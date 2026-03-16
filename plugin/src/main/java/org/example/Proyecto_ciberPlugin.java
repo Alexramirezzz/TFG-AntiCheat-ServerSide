@@ -10,6 +10,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent; // <-- NUEVO IMPORT PARA COMBATE
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -37,6 +38,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     private int maxClicksPerSecond;
     private long minBreakDelay;
     private double maxHorizontalDist;
+    private double maxCombatReach; // <-- NUEVO UMBRAL PARA COMBATE
     private int maxViolations;
 
     @Override
@@ -50,25 +52,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
             getCommand("ciberplugin").setExecutor(new ComandosCiberPlugin(this));
         }
 
-        // Sin tilde para evitar errores de codificacion en Windows
-        getLogger().info("Proyecto_CiberPlugin ACTIVADO. Bastionado en ejecucion.");
+        getLogger().info("Proyecto_CiberPlugin ACTIVADO. Bastionado y ML en ejecucion.");
     }
 
     private void loadConfigValues() {
-        // Leemos valores del archivo
         int configClicks = getConfig().getInt("deteccion.autoclicker.max_clicks_per_second", 15);
         long configBreak = getConfig().getLong("deteccion.fastbreak.min_delay_ms", 500);
         double configSpeed = getConfig().getDouble("deteccion.speed.max_horizontal_distance", 1.2);
+        double configReach = getConfig().getDouble("deteccion.combat.max_reach", 3.8); // <-- LEE EL CONFIG
         int configViolations = getConfig().getInt("sanciones.max_violations_before_kick", 10);
 
-        // -------------------------------------------------
-        // BASTIONADO 1: FAIL-SAFE (Validacion de limites)
-        // Evita que un administrador ponga valores absurdos (ej: -5 o 99999) 
-        // que puedan causar Denegacion de Servicio (DoS) o inoperatividad.
-        // -------------------------------------------------
+        // BASTIONADO: FAIL-SAFE (Validacion de limites)
         this.maxClicksPerSecond = Math.max(5, Math.min(configClicks, 50)); 
         this.minBreakDelay = Math.max(100L, Math.min(configBreak, 2000L)); 
         this.maxHorizontalDist = Math.max(0.5, Math.min(configSpeed, 5.0));
+        this.maxCombatReach = Math.max(3.0, Math.min(configReach, 6.0)); // Límite lógico de alcance en Minecraft
         this.maxViolations = Math.max(3, Math.min(configViolations, 50));
 
         if (configClicks != this.maxClicksPerSecond) {
@@ -81,7 +79,6 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         getLogger().info("Proyecto_CiberPlugin DESACTIVADO.");
     }
 
-    // BASTIONADO 2: Prevencion de fugas de memoria al desconectarse el jugador
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
@@ -95,14 +92,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // MOTOR DE DECISION Y SCORING
     // -------------------------------------------------
     private void flagPlayer(Player player, String cheatType, String evidence) {
-        // BASTIONADO 3: Control de Accesos (RBAC) - Ignorar si tiene permiso
+        // BASTIONADO: Control de Accesos (RBAC) - Ignorar si tiene permiso
         if (player.hasPermission("ciberplugin.bypass")) return;
 
         UUID uuid = player.getUniqueId();
         int score = violationScores.getOrDefault(uuid, 0) + 1;
         violationScores.put(uuid, score);
 
-        // Control de Spam de alertas (1 segundo de cooldown)
+        // Control de Spam de alertas
         long now = System.currentTimeMillis();
         if (now - lastAlertTime.getOrDefault(uuid, 0L) > 1000) {
             lastAlertTime.put(uuid, now);
@@ -117,10 +114,8 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        // Registrar evidencia
         logViolationAsync(player, cheatType, evidence, score);
 
-        // Sancion progresiva
         if (score >= maxViolations) {
             Bukkit.getScheduler().runTask(this, () -> {
                 player.kickPlayer("§cHas sido desconectado.\n§7Motivo: Comportamiento anomalo detectado.");
@@ -130,7 +125,6 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     }
 
     private void logViolationAsync(Player player, String cheatType, String evidence, int score) {
-        // BASTIONADO 4: Ejecucion Asincrona para proteger los TPS del servidor (Rendimiento)
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
                 File logFile = new File(getDataFolder(), "auditoria.log");
@@ -141,7 +135,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                 try (PrintWriter out = new PrintWriter(new FileWriter(logFile, true))) {
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
                     
-                    // BASTIONADO 5: Privacidad por Diseno (Seudonimizacion del UUID)
+                    // BASTIONADO: Privacidad por Diseno
                     String seudoUUID = player.getUniqueId().toString().substring(0, 8) + "-XXXX-XXXX";
 
                     out.printf("[%s] ALERT | Actor: %s | Cheat: %s | VL: %d | Evidencia: %s%n", 
@@ -154,7 +148,36 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     }
 
     // -------------------------------------------------
-    // DETECCIONES (EVENTOS)
+    // NUEVO SISTEMA: EXPORTACIÓN PARA MACHINE LEARNING
+    // -------------------------------------------------
+    private void exportTelemetryForML(UUID uuid, long timeBetweenClicks) {
+        // Operación asíncrona para no afectar al rendimiento (TPS) del servidor
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try {
+                File mlFile = new File(getDataFolder(), "telemetria_ml.csv");
+                boolean isNew = !mlFile.exists();
+                if (isNew) {
+                    mlFile.getParentFile().mkdirs();
+                    mlFile.createNewFile();
+                }
+                try (PrintWriter out = new PrintWriter(new FileWriter(mlFile, true))) {
+                    // Cabeceras si el CSV es nuevo
+                    if (isNew) out.println("timestamp,uuid_ofuscado,delay_ms,label");
+                    
+                    String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+                    String seudoUUID = uuid.toString().substring(0, 8);
+                    
+                    // Label 'unknown' para entrenar algoritmos de Clustering o Isolation Forest
+                    out.printf("%s,%s,%d,unknown%n", timestamp, seudoUUID, timeBetweenClicks);
+                }
+            } catch (IOException e) {
+                // Ignorado para no spamear la consola si hay bloqueos de I/O
+            }
+        });
+    }
+
+    // -------------------------------------------------
+    // DETECCIONES DE MOVIMIENTO (SPEED / FLY)
     // -------------------------------------------------
     @EventHandler
     public void onPlayerMove(PlayerMoveEvent event) {
@@ -181,6 +204,29 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    // -------------------------------------------------
+    // NUEVA DETECCIÓN DE COMBATE (REACH / KILLAURA)
+    // -------------------------------------------------
+    @EventHandler
+    public void onPlayerAttack(EntityDamageByEntityEvent event) {
+        if (event.getDamager() instanceof Player) {
+            Player attacker = (Player) event.getDamager();
+            Location attackerLoc = attacker.getLocation();
+            Location victimLoc = event.getEntity().getLocation();
+
+            // Calculamos la distancia 3D real entre el jugador atacante y la entidad golpeada
+            double distance = attackerLoc.distance(victimLoc);
+
+            // Si la distancia es mayor a nuestro umbral seguro, es un hack tipo Reach
+            if (distance > maxCombatReach && !attacker.isFlying()) {
+                flagPlayer(attacker, "Reach/KillAura", "Distancia ataque: " + String.format("%.2f", distance) + " bloques");
+            }
+        }
+    }
+
+    // -------------------------------------------------
+    // DETECCIONES DE AUTOMATIZACIÓN (CLICS)
+    // -------------------------------------------------
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent event) {
         Player player = event.getPlayer();
@@ -190,6 +236,9 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         if (lastClickTime.containsKey(uuid)) {
             long last = lastClickTime.get(uuid);
             long diff = current - last;
+
+            // Generamos la telemetría para Machine Learning con cada clic
+            exportTelemetryForML(uuid, diff);
 
             if (diff > 0 && diff < (1000 / maxClicksPerSecond)) {
                 flagPlayer(player, "AutoClicker", "Click delay: " + diff + "ms");
