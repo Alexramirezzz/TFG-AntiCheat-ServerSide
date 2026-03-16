@@ -1,0 +1,11 @@
+# Configuración de Bastionado - Proyecto CiberPlugin
+sanciones:
+  max_violations_before_kick: 15
+
+deteccion:
+  autoclicker:
+    max_clicks_per_second: 15
+  fastbreak:
+    min_delay_ms: 450
+  speed:
+    max_horizontal_distance: 1.25

@@ -1,0 +1,28 @@
+plugins {
+    id 'java-gradle-plugin'
+}
+
+repositories {
+    mavenCentral()  // Repositorio principal
+    maven { url = uri("https://repo.papermc.io/repository/maven-public/") }  // Repositorio de PaperMC
+}
+
+dependencies {
+    // Dependencia de Spigot o Paper API
+    implementation 'org.spigotmc:spigot-api:1.18.2-R0.1-SNAPSHOT'  // Cambia si usas Paper API
+
+    // Dependencias de pruebas unitarias (JUnit)
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// Tareas para compilar el archivo .jar
+tasks.named('jar') {
+    archiveBaseName = 'mi-anti-cheat-plugin'
+    from sourceSets.main.output
+}

@@ -1,0 +1,21 @@
+name: Proyecto_CiberPlugin
+main: org.example.Proyecto_ciberPlugin
+version: 1.0
+api-version: 1.18
+description: TFG - Anti-cheat server-side con bastionado
+author: Alejandro Ramirez Arias
+
+commands:
+  ciberplugin:
+    description: Comando principal de administración del anticheat
+    usage: "/ciberplugin <reload|info>"
+    permission: ciberplugin.admin
+    permission-message: "§cNo tienes permisos de administrador para usar este comando."
+
+permissions:
+  ciberplugin.admin:
+    description: Permite recibir alertas del anticheat y usar comandos de administración
+    default: op
+  ciberplugin.bypass:
+    description: Excluye al jugador de las detecciones del anticheat
+    default: false
