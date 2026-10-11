@@ -80,7 +80,8 @@ Labels: `human_combat`, `human_mining`, `human_explore`, `auto_fixed`, `auto_jit
 - **Held-button state machine:** `interact_block` or a break opens a dig. While consecutive
   swings stay ≤ 65 ms apart they are *held* (the client sends one swing per tick while the
   button is held). In the real data the break arrives *before* the held swings when blocks
-  break instantly.
+  break instantly. A single late swing (≤ 85 ms, one slow server tick) does not end the dig;
+  a skipped tick (~100 ms) does, so a clicker alternating 50/100 ms is never treated as mining.
 - **Moves:** trimmed 5 s after the **first move** (moves start ~12 s after `/record start`).
 
 **Windows and features.**
@@ -145,10 +146,10 @@ Labels: `human_combat`, `human_mining`, `human_explore`, `auto_fixed`, `auto_jit
 - **Timing is quantized to the 50 ms tick grid.** 73% of real *active* click intervals lie
   within ±5 ms of a 50 ms multiple, against 20% without quantization (n = 15, KS p = 0.014).
   See ![quantization](results/figures/real_tick_quantization.png).
-- **Simulated lag on the real timestamps** (`phase_f_results.md`): jitter of ≥ 8 ms breaks the
-  held-button rule. Cleaned-rule violations rise from 0 to 8.7 (ping 80) and 16.4 (ping 150) on
-  average over 20 draws. This is a weakness of the cleaning rule that real lag tests must
-  quantify.
+- **Simulated lag on the real timestamps** (`phase_f_results.md`): jitter spreads held swings
+  beyond the held tolerance. With the late-tick rule, cleaned-rule violations go from 0 to 1.6
+  (ping 80), 6.65 (ping 150) and 9.15 (ping 250) on average over 20 draws; with a strict 65 ms
+  release rule they were 8.7, 16.4 and 13.95. Real lag tests must confirm this.
 
 ### DEMO - synthetic, not evidence about real players
 
@@ -188,9 +189,9 @@ Phase E (adversarial; recall at 1% FPR, XGBoost):
 
 See ![adversarial](results/figures/adversarial_recall_vs_level.png).
 
-Phase F (simulated lag, fresh synthetic humans): XGBoost FPR goes 2.8% → 7.6% → 12.3% at ping
-0 / 80 / 150 ms. RF stays ≤ 2.6% but loses recall at 250 ms (0.42). One-Class SVM reaches 100%
-FPR from 80 ms.
+Phase F (simulated lag, fresh synthetic humans): XGBoost FPR is 2.8% / 2.5% / 4.3% / 1.9% at
+ping 0 / 80 / 150 / 250 ms. RF stays ≤ 2.6% but loses recall at 250 ms (0.42). Isolation Forest
+rises to 30% at 150 ms and One-Class SVM reaches 100% FPR from 80 ms.
 
 Phase G: SHAP ranks histogram entropy, mean interval and lag-1 autocorrelation first.
 Permutation importance is ~0 because the features are redundant and PR-AUC is saturated.
@@ -201,10 +202,14 @@ human.
 - The XGBoost model is selected by the documented rule: best recall at 1% FPR, and if within 1
   point, the smaller model. 183 KB vs 2.5 MB for RF.
 - It ships as `models/click_model.onnx` with Python/ONNX parity of 3e-7.
-- Inference is ~25 µs per window (Python onnxruntime on this machine; not measured inside the
+- Inference takes ~25–45 µs per window (median over two runs, Python onnxruntime on this machine; not measured inside the
   server).
 - It runs on a background thread, and the default `engine: threshold` keeps it off. Use
   `shadow` to log scores without VL.
+- Detector fixes after a manual server test: held-button late-tick tolerance (AutoClicker),
+  FastBreak based on the expected break time of each block (`getBreakSpeed`, vanilla 0.7
+  margin, creative skipped), Fly limited to anomalous ascent, and movement checks skipped for
+  creative/spectator, flight, elytra, riptide and vehicles. Details in `docs/ml_report.md`, §6.
 
 ## Limitations
 
@@ -230,7 +235,8 @@ See also `docs/ml_report.md` (paper-style report) and `docs/real_lag_test_protoc
 - **Raw data location** is configurable (`ML_RAW_DIR` / `-RawDir`), so the pipeline can run
   against data stored outside the repository.
 - **Held swings arrive every ~50 ms** in the real data (one swing per client tick), so the held
-  rule uses a 65 ms tolerance.
+  rule uses a 65 ms tolerance, and an 85 ms release gap so that one slow tick (67 ms was observed
+  in a server test) does not end a mining run.
 - **Feature definitions** use biased moments and explicit percentiles so that the Java port
   matches them exactly.
 - **`held_frac`, ping and TPS are not model inputs** (see Method).

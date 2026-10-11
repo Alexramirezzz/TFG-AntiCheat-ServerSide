@@ -114,8 +114,9 @@ The only real session is P01: 65 s, legacy label `human` → `human_unspecified`
    intervals between `interact_*` events, which mixes these.
 2. **Held button = one swing per tick.** While the button is held the client sends a swing every
    tick (~50 ms). The real data show the `break` arriving *before* those swings when blocks break
-   instantly. A held-button state machine handles this: a dig marker opens a run that lasts while
-   swings stay ≤ 65 ms apart. Here 56 of 77 accepted swings are held.
+   instantly. A held-button state machine handles this: a dig marker opens a run in which swings
+   ≤ 65 ms apart are held. One late swing (≤ 85 ms, a slow server tick) does not end the run, but a
+   skipped tick (~100 ms) does. Here 56 of 77 accepted swings are held.
 3. **Quantization.** Intervals cluster on multiples of 50 ms (Figure 1).
 
    | intervals | n | within ±5 ms of the grid | KS vs uniform residuals |
@@ -305,19 +306,21 @@ Realised human FPR at the 1% threshold:
 
 | ping (ms) | 0 | 20 | 80 | 150 | 250 |
 |---|---|---|---|---|---|
-| XGBoost | 0.028 | 0.024 | 0.076 | 0.123 | 0.026 |
-| Random Forest | 0.026 | 0.025 | 0.021 | 0.026 | 0.009 |
-| Isolation Forest | 0.009 | 0.028 | 0.149 | 0.398 | 0.540 |
+| XGBoost | 0.028 | 0.024 | 0.025 | 0.043 | 0.019 |
+| Random Forest | 0.026 | 0.025 | 0.014 | 0.011 | 0.007 |
+| Isolation Forest | 0.009 | 0.028 | 0.087 | 0.305 | 0.529 |
 | One-Class SVM | 0.013 | 0.079 | 1.000 | 1.000 | 1.000 |
 
 - Even at ping 0 the tree models' realised FPR on this *new* population (2.6–2.8%) exceeds the
   1% calibration target: thresholds transfer imperfectly across populations.
 - The novelty detectors are fragile under lag; tree models are less affected.
 - Random Forest recall on attackers falls to 0.42 at 250 ms.
-- **Real timestamps + simulated lag:** applying the same lag to P01's events breaks the
-  held-button rule. Cleaned original-rule violations rise from 0 to 8.7 (ping 80) and 16.4
-  (ping 150), averaged over 20 draws, because held swings get spread beyond 65 ms. The cleaning
-  rule's robustness therefore has to be measured with real lag (protocol in `docs/real_lag_test_protocol.md`).
+- **Real timestamps + simulated lag:** jitter spreads P01's held swings beyond the held tolerance,
+  so some mining swings are evaluated as clicks. Averaged over 20 draws, cleaned original-rule
+  violations go from 0 to 1.6 (ping 80), 6.65 (ping 150) and 9.15 (ping 250). With the first
+  version of the rule, where any gap above 65 ms ended the run, they were 8.7, 16.4 and 13.95.
+  The late-tick tolerance was introduced after the manual server test described in Section 6.
+  Real lag measurements are still needed (protocol in `docs/real_lag_test_protocol.md`).
 
 ### 5.4 Explainability (DEMO model)
 
@@ -360,7 +363,7 @@ The extension follows the thesis's operational constraints.
     blocking a tick. Resulting flags return to the main thread and feed `flagPlayer`.
   - The selected model is XGBoost: best recall at 1% FPR, and within 1 point of RF while being
     14× smaller (183 KB).
-  - ONNX inference costs ~25 µs per window (median, Python onnxruntime on the development
+  - ONNX inference costs ~25–45 µs per window (median over two runs, Python onnxruntime on the development
     machine; not measured inside the server).
 - **Fail-safe switch.**
   - `deteccion.autoclicker.engine: threshold | shadow | ml`, default `threshold`.
@@ -377,19 +380,34 @@ The extension follows the thesis's operational constraints.
 - **Verification.**
   - 11 JUnit tests: cleaner cases, Java↔Python feature and ONNX parity (max |Δ| 3e-7 in
     Python↔ONNX), the ML-thread hand-off, and the RFC 4231 HMAC test vector.
-  - The jar builds with `gradlew build`. A manual smoke test on a local Paper 1.18.2 server
+  - The jar builds with `gradlew build`. A manual test on a local Paper 1.18.2 server
     confirmed that ONNX Runtime is fetched by the library loader, the model loads in `shadow`
     mode, the HMAC key is generated, and audit and telemetry lines carry `p-…` pseudonyms.
+- **Fixes motivated by the manual server test.** In ~35 s of legitimate play the player was
+  kicked twice:
+  - **AutoClicker while mining.** One held swing arrived 67 ms after the previous one (a slow
+    tick), the held rule treated it as a release, and the rest of the run was evaluated as
+    clicking. Fixed with the 85 ms release gap (Python and Java, with the observed sequence as a
+    unit test).
+  - **FastBreak.** Breaks every ~300 ms in creative mode were flagged by the fixed 450 ms rule.
+    FastBreak now compares the time spent digging *that* block with the time expected from
+    `Block#getBreakSpeed(Player)` (block hardness, tool, enchantments, effects, water, on-ground).
+    It flags only breaks faster than 70% of that time, the same margin the vanilla server
+    accepts, and skips creative and spectator players.
+  - **Fly.** A normal fall was flagged because the rule used `|dy| > 1` while airborne. It now
+    flags only anomalous *ascent* (`dy > 1`, a normal jump rises 0.42 blocks/tick).
+  - **Movement exemptions.** Speed, Fly and No-Clip skip creative/spectator players and players
+    who are allowed to fly, gliding with an elytra, riptiding or riding a vehicle.
+
+  The Python baselines in Section 3.3 still reproduce the *original* thesis rules, so that the
+  comparison with the original detector stays visible.
 
 ## 7. Limitations and ethics
 
 **Limitations.**
-- **Known issue from the manual server test.** On localhost, one held-button swing arrived
-  67 ms after the previous one (a slow tick). The held rule treats any gap above 65 ms as a
-  release, so the rest of that mining run was evaluated as clicking and raised AutoClicker
-  violations. Separating the held tolerance (≤ 65 ms) from the release gap (e.g. > 150 ms) is
-  the planned fix. In the same test the original Fly rule flagged a normal fall, and the
-  original FastBreak rule flagged creative-mode breaking.
+- **Held-button rule under lag.** The late-tick tolerance (Section 6) reduces, but does not
+  remove, false AutoClicker flags under jitter (Section 5.3). The 85 ms release gap is a
+  compromise: it absorbs one slow tick without letting a 50/100 ms clicker pass as mining.
 - **Evidence.** There is no real-data detection result: one participant, one 65 s session,
   probably in creative mode, and zero scoreable windows. Every detection number is DEMO and
   depends on assumed human parameters. The direction of some conclusions (e.g. the original
