@@ -1,0 +1,37 @@
+{
+  "human_generator": "placeholder",
+  "hyper": {
+    "median_ms": [
+      90.0,
+      170.0
+    ],
+    "sigma": [
+      0.2,
+      0.45
+    ],
+    "rho": [
+      0.1,
+      0.5
+    ],
+    "bout_mean_clicks": [
+      8.0,
+      25.0
+    ],
+    "pause_median_ms": [
+      400.0,
+      1200.0
+    ],
+    "fatigue": [
+      0.0,
+      0.15
+    ]
+  },
+  "info": {
+    "active_intervals": 15,
+    "participants": 1,
+    "min_required": 300,
+    "mode": "placeholder",
+    "jitter_sigma_ms": 2.5332486799134935,
+    "jitter_source": "real (n=71)"
+  }
+}
