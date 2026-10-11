@@ -50,11 +50,11 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
     // NUEVO: motor de AutoClicker. threshold = detector original (por defecto); shadow = umbral activo y el
     // modelo ML solo se registra (sin VL); ml = el modelo ML suma VL y el umbral queda como respaldo.
-    private String clickEngine = "threshold";
+    private volatile String clickEngine = "threshold";   // leido tambien desde el hilo de ML
     private double mlThresholdOverride;
     private MlClickDetector mlDetector;   // null si el motor ML no esta activo o no pudo cargarse
-    private ClickModel clickModel;
-    private double mlThreshold;
+    private volatile ClickModel clickModel;
+    private volatile double mlThreshold;
 
     // BASTIONADO: seudonimizacion con clave (HMAC-SHA256) para auditoria y telemetria
     private volatile Pseudonymizer pseudonymizer;
