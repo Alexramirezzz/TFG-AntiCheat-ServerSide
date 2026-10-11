@@ -157,6 +157,31 @@ def main() -> None:
     (tdir / "click_features_fixture.json").write_text(json.dumps(fx, indent=1))
     log.info("exported %s (%d bytes), threshold@1%%=%.4f", out.name, out.stat().st_size, thr[0.01])
 
+    # Latency of one window (feature extraction in Python + single-row ONNX inference, 1 thread).
+    # Indicative only: measured in Python on this machine, not inside the Minecraft server.
+    import platform
+    import time
+    so = ort.SessionOptions(); so.intra_op_num_threads = 1
+    sess = ort.InferenceSession(str(out), so, providers=["CPUExecutionProvider"])
+    name = sess.get_inputs()[0].name
+    x1 = X[:1]
+    for _ in range(200):
+        sess.run(None, {name: x1})
+    lat = []
+    for i in range(2000):
+        t0 = time.perf_counter(); sess.run(None, {name: X[i % len(X):i % len(X) + 1]}); lat.append(time.perf_counter() - t0)
+    tw = np.cumsum(np.full(50, 100.0)); hw = np.zeros(50, bool); dw = np.zeros(50)
+    fl = []
+    for _ in range(2000):
+        t0 = time.perf_counter(); window_features(tw, hw, dw); fl.append(time.perf_counter() - t0)
+    pd.DataFrame([{"what": "onnx_inference_1_window", "median_us": np.median(lat) * 1e6,
+                   "p99_us": np.percentile(lat, 99) * 1e6},
+                  {"what": "python_feature_extraction_1_window", "median_us": np.median(fl) * 1e6,
+                   "p99_us": np.percentile(fl, 99) * 1e6}]).assign(
+        machine=f"{platform.processor() or platform.machine()} / {platform.system()}",
+        note="Python onnxruntime, 1 intra-op thread; indicative, not measured in the server").to_csv(
+        C.TAB_DIR / "onnx_latency.csv", index=False)
+
 
 if __name__ == "__main__":
     main()
