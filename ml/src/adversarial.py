@@ -70,9 +70,11 @@ def plot_main(summ: dict[str, pd.DataFrame], levels_by_round: dict[str, list[str
             v = np.array([r.get(f"recall@0.01[{l}]", np.nan) for l in lv], float)
             lo = np.array([r.get(f"recall@0.01[{l}]_lo", np.nan) for l in lv], float)
             hi = np.array([r.get(f"recall@0.01[{l}]_hi", np.nan) for l in lv], float)
-            ls = "--" if r["model"].startswith("baseline") else "-"
-            ax.errorbar(x, v, yerr=[v - lo, hi - v], marker="o", ms=4, capsize=3, ls=ls, lw=1.2,
-                        label=r["model"])
+            fixed = r["model"].startswith("baseline")
+            lab = (f"{r['model']} (fixed rule, human FPR {r['fpr@0.01']:.0%})" if fixed
+                   else f"{r['model']} (human FPR {r['fpr@0.01']:.1%})")
+            ax.errorbar(x, v, yerr=[v - lo, hi - v], marker="o", ms=4, capsize=3,
+                        ls="--" if fixed else "-", lw=1.2, label=lab)
         ax.set_xticks(x, lv, rotation=20, fontsize=8)
         ax.set_title(rname, fontsize=9)
         ax.set_ylim(-0.02, 1.02)
