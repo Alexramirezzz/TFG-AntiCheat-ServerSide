@@ -2,6 +2,10 @@ name: Proyecto_CiberPlugin
 main: org.example.Proyecto_ciberPlugin
 version: 1.0
 api-version: 1.18
+# ONNX Runtime se descarga de Maven Central al arrancar (cargador de librerias de Spigot/Paper).
+# Si no esta disponible, el plugin usa el detector por umbral.
+libraries:
+  - com.microsoft.onnxruntime:onnxruntime:1.19.2
 description: TFG - Anti-cheat server-side con bastionado
 author: Alejandro Ramirez Arias
 

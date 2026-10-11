@@ -24,6 +24,7 @@ import java.io.PrintWriter;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -47,6 +48,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // NUEVO: grabador de sesiones para el dataset
     private SessionRecorder recorder;
 
+    // NUEVO: motor de AutoClicker. threshold = detector original (por defecto); shadow = umbral activo y el
+    // modelo ML solo se registra (sin VL); ml = el modelo ML suma VL y el umbral queda como respaldo.
+    private String clickEngine = "threshold";
+    private double mlThresholdOverride;
+    private MlClickDetector mlDetector;   // null si el motor ML no esta activo o no pudo cargarse
+    private ClickModel clickModel;
+    private double mlThreshold;
+
     // NUEVO
     public SessionRecorder getRecorder() {
         return recorder;
@@ -59,6 +68,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
         recorder = new SessionRecorder(this); // NUEVO
         recorder.open();                      // NUEVO
+        initMlEngine();                       // NUEVO
 
         getServer().getPluginManager().registerEvents(this, this);
 
@@ -86,10 +96,81 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         if (configClicks != this.maxClicksPerSecond) {
             getLogger().warning("Parametro AutoClicker fuera de limites. Se forzo valor seguro: " + this.maxClicksPerSecond);
         }
+
+        // BASTIONADO: FAIL-SAFE del selector de motor (valor desconocido -> detector por umbral)
+        String engine = getConfig().getString("deteccion.autoclicker.engine", "threshold").trim().toLowerCase(Locale.ROOT);
+        if (!engine.equals("threshold") && !engine.equals("shadow") && !engine.equals("ml")) {
+            getLogger().warning("deteccion.autoclicker.engine invalido (" + engine + "). Se usa 'threshold'.");
+            engine = "threshold";
+        }
+        this.clickEngine = engine;
+        double thr = getConfig().getDouble("deteccion.autoclicker.ml_threshold", 0.0);
+        // 0 = usar el umbral calibrado del modelo; si se fija a mano se limita a [0.5, 0.9999]
+        this.mlThresholdOverride = thr <= 0 ? 0 : Math.max(0.5, Math.min(thr, 0.9999));
+    }
+
+    // MOTOR ML: carga el modelo ONNX y, ante cualquier fallo, vuelve al detector por umbral (fail-safe)
+    private void initMlEngine() {
+        shutdownMlEngine();
+        if (clickEngine.equals("threshold")) return;
+        try {
+            File dir = new File(getDataFolder(), "models");
+            if (!new File(dir, "click_model.onnx").exists()) saveResource("models/click_model.onnx", false);
+            if (!new File(dir, "click_model.json").exists()) saveResource("models/click_model.json", false);
+            clickModel = ClickModel.load(new File(dir, "click_model.onnx").toPath(),
+                    new File(dir, "click_model.json").toPath());
+            mlThreshold = mlThresholdOverride > 0 ? mlThresholdOverride : clickModel.threshold;
+            final ClickModel model = clickModel;
+            mlDetector = new MlClickDetector(model::score, this::onMlWindowScored);
+            getLogger().info("Motor AutoClicker '" + clickEngine + "' con modelo " + model.description
+                    + ", umbral " + String.format(Locale.ROOT, "%.4f", mlThreshold));
+            if (model.demo) {
+                getLogger().warning("El modelo ML es una DEMO entrenada con datos sinteticos: usar 'shadow' hasta validarlo con datos reales.");
+            }
+        } catch (Throwable t) { // incluye NoClassDefFoundError si ONNX Runtime no esta disponible
+            getLogger().warning("Motor ML no disponible (" + t + "). Se usa el detector por umbral.");
+            shutdownMlEngine();
+            clickEngine = "threshold";
+        }
+    }
+
+    private void shutdownMlEngine() {
+        if (mlDetector != null) {
+            if (mlDetector.droppedWindows() > 0 || mlDetector.errors() > 0) {
+                getLogger().warning("Motor ML: ventanas descartadas=" + mlDetector.droppedWindows()
+                        + ", errores=" + mlDetector.errors());
+            }
+            mlDetector.shutdown();
+            mlDetector = null;
+        }
+        if (clickModel != null) {
+            try { clickModel.close(); } catch (Exception ignored) { }
+            clickModel = null;
+        }
+    }
+
+    // Llamado desde el hilo de ML: toda accion sobre Bukkit vuelve al hilo principal
+    private void onMlWindowScored(UUID uuid, double score, ClickFeatureExtractor.Result f) {
+        if (!isEnabled()) return;
+        boolean flagged = score > mlThreshold;
+        String evidence = String.format(Locale.ROOT,
+                "score=%.3f umbral=%.3f | entropia=%.2f bits, media=%.0f ms, cv=%.2f, ac1=%.2f, max_cps=%.0f%s",
+                score, mlThreshold, f.get("entropy"), f.get("mean"), f.get("cv"), f.get("ac1"),
+                f.get("max_cps_1s"), clickModel != null && clickModel.demo ? " (modelo DEMO)" : "");
+        if (clickEngine.equals("shadow")) {
+            logMlShadowAsync(uuid, score, flagged, evidence);
+            return;
+        }
+        if (!flagged) return;
+        Bukkit.getScheduler().runTask(this, () -> {
+            Player p = Bukkit.getPlayer(uuid);
+            if (p != null && p.isOnline()) flagPlayer(p, "AutoClicker-ML", evidence);
+        });
     }
 
     @Override
     public void onDisable() {
+        shutdownMlEngine();                     // NUEVO
         if (recorder != null) recorder.close(); // NUEVO
         getLogger().info("Proyecto_CiberPlugin DESACTIVADO.");
     }
@@ -99,6 +180,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         UUID uuid = event.getPlayer().getUniqueId();
         recorder.stopSession(uuid); // NUEVO
         clickCleaners.remove(uuid);
+        if (mlDetector != null) mlDetector.remove(uuid);
         lastBlockBreakTime.remove(uuid);
         violationScores.remove(uuid);
         lastAlertTime.remove(uuid);
@@ -162,6 +244,34 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Error escribiendo auditoria forense: " + e.getMessage());
             }
         });
+    }
+
+    // MODO SHADOW: se registra cada ventana puntuada por el modelo sin sumar VL (validacion en produccion)
+    private void logMlShadowAsync(UUID uuid, double score, boolean flagged, String evidence) {
+        String actor = pseudonym(uuid);
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try {
+                File f = new File(getDataFolder(), "ml_shadow.csv");
+                boolean isNew = !f.exists();
+                if (isNew) {
+                    f.getParentFile().mkdirs();
+                    f.createNewFile();
+                }
+                try (PrintWriter out = new PrintWriter(new FileWriter(f, true))) {
+                    if (isNew) out.println("timestamp,actor,score,threshold,would_flag,evidence");
+                    String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+                    out.printf(Locale.ROOT, "%s,%s,%.4f,%.4f,%b,\"%s\"%n", timestamp, actor,
+                            score, mlThreshold, flagged, evidence.replace("\"", "'"));
+                }
+            } catch (IOException e) {
+                getLogger().warning("Error escribiendo ml_shadow.csv: " + e.getMessage());
+            }
+        });
+    }
+
+    // Seudonimo del jugador para los registros
+    private String pseudonym(UUID uuid) {
+        return uuid.toString().substring(0, 8) + "-XXXX-XXXX";
     }
 
     // EXPORTACIÓN PARA MACHINE LEARNING
@@ -266,7 +376,10 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
         UUID uuid = player.getUniqueId();
         ClickStreamCleaner.Swing swing = cleanerOf(uuid).onSwing(nowMs());
-        if (swing == null || swing.held || Double.isNaN(swing.ivMs)) return; // duplicado / minando / primer clic
+        if (swing == null) return;                                   // duplicado
+        if (mlDetector != null) mlDetector.onAccepted(uuid, swing);  // el modelo ve tambien los swings "held"
+        if (swing.held || Double.isNaN(swing.ivMs)) return;          // minando / primer clic
+        if (clickEngine.equals("ml")) return;                        // en modo ml el umbral queda de respaldo
 
         long diff = (long) Math.floor(swing.ivMs);
         exportTelemetryForML(uuid, diff);
@@ -307,5 +420,6 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     public void reloadPluginConfig() {
         reloadConfig();
         loadConfigValues();
+        initMlEngine();
     }
 }

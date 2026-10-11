@@ -1,0 +1,49 @@
+{
+  "model": "xgb",
+  "features": [
+    "mean",
+    "std",
+    "cv",
+    "skew",
+    "kurt",
+    "min",
+    "p05",
+    "p95",
+    "entropy",
+    "ac1",
+    "max_cps_1s",
+    "tick_frac",
+    "dup_frac",
+    "pause_frac"
+  ],
+  "threshold_fpr_1pct": 0.9643027782440186,
+  "threshold_fpr_0.1pct": 0.9995511174201965,
+  "calibration_human_windows": 1086,
+  "window_clicks": 50,
+  "stride_clicks": 25,
+  "min_intervals": 10,
+  "dedup_ms": 15.0,
+  "held_max_iv_ms": 65.0,
+  "fresh_dig_ms": 15.0,
+  "pause_ms": 1000.0,
+  "held_route_frac": 0.5,
+  "tick_ms": 50.0,
+  "tick_near_ms": 5.0,
+  "trained_on": "SYNTHETIC humans (placeholder generator) + synthetic none/uniform/gaussian clickers",
+  "demo": true,
+  "warning": "DEMO - synthetic, not evidence about real players",
+  "cv_recall_at_1pct_fpr_synthetic": 0.9842030528931488,
+  "cv_fpr_at_1pct_synthetic": 0.0079437131184748,
+  "onnx_parity_max_abs_diff": 2.980232238769531e-07,
+  "selection": {
+    "recall_at_1pct": {
+      "rf": 0.9862146491539464,
+      "xgb": 0.9842030528931488
+    },
+    "onnx_bytes": {
+      "rf": 2553637,
+      "xgb": 183399
+    },
+    "rule": "best recall@1%FPR; within 1 point -> smaller ONNX model"
+  }
+}
