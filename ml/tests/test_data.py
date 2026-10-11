@@ -96,3 +96,24 @@ def test_schema_rejects_unknown_label(tmp_path):
 
 def test_original_threshold_is_java_integer_division():
     assert C.ORIG_CLICK_MIN_DIFF_MS == 66
+
+
+def test_late_tick_does_not_end_held_run():
+    # sequence seen in the manual server test: dig start, then held swings where one tick
+    # arrived 67 ms late (slow server tick) followed by 33, 48, 49, 50, 50 ms
+    t, ev = 0.0, [(0.0, "interact_block"), (0.4, "swing")]
+    for iv in (67, 33, 48, 49, 50, 50):
+        t += iv
+        ev.append((0.4 + t, "swing"))
+    s = clean_click_stream(clicks(ev))
+    assert s["held"].tolist() == [False, False, True, True, True, True, True]
+
+
+def test_clicker_alternating_ticks_after_block_hit_is_not_held():
+    # attacker hits a block once, then clicks at ~13 CPS: observed as 50/100 ms intervals
+    ev, t = [(0.0, "interact_block"), (0.4, "swing")], 0.4
+    for k in range(20):
+        t += 100.0 if k % 2 == 0 else 50.0
+        ev.append((t, "swing"))
+    s = clean_click_stream(clicks(ev))
+    assert not s["held"].any()
