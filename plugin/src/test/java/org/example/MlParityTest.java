@@ -97,34 +97,49 @@ class MlParityTest {
     }
 
     @Test
-    void onnxModelMatchesPythonScores() throws Exception {
-        Path onnx = Path.of("src/main/resources/models/click_model.onnx");
-        Path meta = Path.of("src/main/resources/models/click_model.json");
-        assertTrue(Files.exists(onnx), "run ml/src/export_onnx.py first");
-        try (ClickModel m = ClickModel.load(onnx, meta)) {
+    void onnxEnsembleMatchesPythonScoresAndPvalues() throws Exception {
+        Path dir = Path.of("src/main/resources/models");
+        Path meta = dir.resolve("click_model.json");
+        assertTrue(Files.exists(meta), "run ml/src/export_onnx.py first");
+        try (ClickModel m = ClickModel.load(dir, meta)) {
+            assertEquals(2, m.size());
             for (JsonElement se : fixture().getAsJsonArray("model_samples")) {
                 JsonObject s = se.getAsJsonObject();
-                JsonArray xa = s.getAsJsonArray("x");
-                float[] x = new float[xa.size()];
-                for (int i = 0; i < x.length; i++) x[i] = xa.get(i).getAsFloat();
-                assertEquals(s.get("score").getAsDouble(), m.score(x), 1e-5);
+                assertEquals(s.get("score").getAsDouble(), m.rawScores(vector(s.getAsJsonArray("x")))[0], 1e-5);
             }
-            assertTrue(m.threshold > 0 && m.threshold < 1);
+            int checked = 0;
+            for (JsonElement se : fixture().getAsJsonArray("ensemble_samples")) {
+                JsonObject s = se.getAsJsonObject();
+                double[] p = m.pvalues(vector(s.getAsJsonArray("x")));
+                JsonArray exp = s.getAsJsonArray("p");
+                for (int i = 0; i < p.length; i++) {
+                    assertEquals(exp.get(i).getAsDouble(), p[i], 1e-12, "p-value model " + i);
+                }
+                checked++;
+            }
+            assertTrue(checked > 0);
+            assertTrue(m.alpha > 0 && m.sessionK >= 1 && m.sessionK <= m.sessionN);
         }
+    }
+
+    private static float[] vector(JsonArray xa) {
+        float[] x = new float[xa.size()];
+        for (int i = 0; i < x.length; i++) x[i] = xa.get(i).getAsFloat();
+        return x;
     }
 
     @Test
     void detectorScoresWindowsOffTheCallerThread() throws Exception {
         List<String> threads = new ArrayList<>();
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
-        MlClickDetector d = new MlClickDetector(x -> 0.5f, (p, s, f) -> {
+        MlClickDetector d = new MlClickDetector(x -> new double[]{0.5}, (p, s, f, ping, tps) -> {
             threads.add(Thread.currentThread().getName());
             done.countDown();
         });
         java.util.UUID u = java.util.UUID.randomUUID();
         ClickStreamCleaner c = new ClickStreamCleaner();
         for (int i = 0; i <= MlClickDetector.WINDOW; i++) {
-            d.onAccepted(u, c.onSwing(100.0 * i + (i % 3) * 7));
+            d.onAccepted(u, c.onSwing(100.0 * i + (i % 3) * 7), 20, 20.0);
         }
         assertTrue(done.await(5, java.util.concurrent.TimeUnit.SECONDS));
         assertEquals("CiberPlugin-ML", threads.get(0));

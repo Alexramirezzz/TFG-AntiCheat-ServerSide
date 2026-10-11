@@ -115,6 +115,11 @@ public class SessionRecorder {
         return s;
     }
 
+    /** TPS medido por la tarea de este grabador (tambien lo usa el modo conservador de los detectores). */
+    public double getTps() {
+        return tps;
+    }
+
     public boolean isRecording(UUID playerId) {
         return sessions.containsKey(playerId);
     }

@@ -11,14 +11,28 @@ deteccion:
     #   ml        -> el modelo ML suma VL; si el modelo no carga se vuelve al umbral
     # El modelo incluido es una DEMO entrenada con datos sinteticos: no usar 'ml' sin validarlo antes.
     engine: threshold
-    # 0 = umbral calibrado del modelo (FPR 1% en humanos de calibracion); si no, valor en [0.5, 0.9999]
-    ml_threshold: 0
+    # Nivel de falsos positivos por ventana (p-valores calibrados con humanos). 0 = el del modelo (0.01).
+    # Si se fija a mano se limita a [0.001, 0.05].
+    ml_alpha: 0
+    # Decision por sesion: se suma VL cuando al menos K de las ultimas N ventanas estan marcadas.
+    # 0 = valores del modelo (K=3, N=8).
+    ventanas_para_alarma: 0
+    ventanas_historial: 0
     # false = usar siempre el modelo incluido en el plugin; true = usar el de plugins/<plugin>/models/
     ml_custom_model: false
   fastbreak:
     # Fraccion minima del tiempo de rotura esperado del bloque (segun herramienta y efectos).
     # 0.7 es el margen que acepta el propio servidor vanilla. Rango valido [0.3, 1.0].
     tolerance: 0.7
+  # Modo conservador: con lag o servidor lento los tiempos entre clics no son fiables.
+  #   ping <= ping_normal_max_ms             -> evaluacion normal
+  #   ping <= ping_estricto_max_ms           -> se exige mas evidencia (alpha x 0.25)
+  #   ping mayor o TPS < tps_minimo          -> no se evaluan los clics (queda registrado en modo shadow)
+  lag:
+    modo_conservador: true
+    ping_normal_max_ms: 80
+    ping_estricto_max_ms: 150
+    tps_minimo: 18.0
   speed:
     max_horizontal_distance: 0.1
 

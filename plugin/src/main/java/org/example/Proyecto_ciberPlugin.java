@@ -53,11 +53,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // NUEVO: motor de AutoClicker. threshold = detector original (por defecto); shadow = umbral activo y el
     // modelo ML solo se registra (sin VL); ml = el modelo ML suma VL y el umbral queda como respaldo.
     private volatile String clickEngine = "threshold";   // leido tambien desde el hilo de ML
-    private double mlThresholdOverride;
+    private double mlAlphaOverride;       // 0 = alpha del modelo
     private boolean mlCustomModel;        // true = respetar el modelo de la carpeta del plugin
     private MlClickDetector mlDetector;   // null si el motor ML no esta activo o no pudo cargarse
     private volatile ClickModel clickModel;
-    private volatile double mlThreshold;
+    private double mlAlpha;
+    private int sessionK;
+    private int sessionN;
+    private final Map<UUID, SessionDecision> sessionDecisions = new HashMap<>();
+
+    // NUEVO: modo conservador segun ping y TPS (para el motor ML y el detector de clics por umbral)
+    private boolean conservativeMode;
+    private int cfgNormalMaxPing;
+    private int cfgStrictMaxPing;
+    private double cfgMinTps;
+    private LagPolicy lagPolicy = new LagPolicy(80, 150, 0.25, 18.0);
 
     // BASTIONADO: seudonimizacion con clave (HMAC-SHA256) para auditoria y telemetria
     private volatile Pseudonymizer pseudonymizer;
@@ -111,10 +121,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
             engine = "threshold";
         }
         this.clickEngine = engine;
-        double thr = getConfig().getDouble("deteccion.autoclicker.ml_threshold", 0.0);
-        // 0 = usar el umbral calibrado del modelo; si se fija a mano se limita a [0.5, 0.9999]
-        this.mlThresholdOverride = thr <= 0 ? 0 : Math.max(0.5, Math.min(thr, 0.9999));
+        double alpha = getConfig().getDouble("deteccion.autoclicker.ml_alpha", 0.0);
+        // 0 = alpha del modelo (FPR por ventana en humanos de calibracion); a mano se limita a [0.001, 0.05]
+        this.mlAlphaOverride = alpha <= 0 ? 0 : Math.max(0.001, Math.min(alpha, 0.05));
         this.mlCustomModel = getConfig().getBoolean("deteccion.autoclicker.ml_custom_model", false);
+        // 0 = valores del modelo; si no, se validan al cargar el modelo (1 <= k <= n <= 32)
+        this.sessionK = getConfig().getInt("deteccion.autoclicker.ventanas_para_alarma", 0);
+        this.sessionN = getConfig().getInt("deteccion.autoclicker.ventanas_historial", 0);
+
+        // BASTIONADO: FAIL-SAFE del modo conservador
+        this.conservativeMode = getConfig().getBoolean("deteccion.lag.modo_conservador", true);
+        this.cfgNormalMaxPing = Math.max(20, Math.min(getConfig().getInt("deteccion.lag.ping_normal_max_ms", 80), 500));
+        this.cfgStrictMaxPing = Math.max(cfgNormalMaxPing,
+                Math.min(getConfig().getInt("deteccion.lag.ping_estricto_max_ms", 150), 1000));
+        this.cfgMinTps = Math.max(5.0, Math.min(getConfig().getDouble("deteccion.lag.tps_minimo", 18.0), 20.0));
+        this.lagPolicy = new LagPolicy(cfgNormalMaxPing, cfgStrictMaxPing, 0.25, cfgMinTps);
     }
 
     // BASTIONADO: clave HMAC en config.yml (privacidad.hmac_key). Si falta o es invalida se genera una
@@ -144,16 +165,23 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                     || !new File(dir, "click_model.json").exists();
             if (useBundled) {
                 saveResource("models/click_model.onnx", true);
+                saveResource("models/click_model_novelty.onnx", true);
                 saveResource("models/click_model.json", true);
             }
-            clickModel = ClickModel.load(new File(dir, "click_model.onnx").toPath(),
-                    new File(dir, "click_model.json").toPath());
-            mlThreshold = mlThresholdOverride > 0 ? mlThresholdOverride : clickModel.threshold;
+            clickModel = ClickModel.load(dir.toPath(), new File(dir, "click_model.json").toPath());
             final ClickModel model = clickModel;
-            mlDetector = new MlClickDetector(model::score, this::onMlWindowScored);
-            getLogger().info("Motor AutoClicker '" + clickEngine + "' con modelo " + model.description
+            mlAlpha = mlAlphaOverride > 0 ? mlAlphaOverride : model.alpha;
+            int n = sessionN > 0 ? Math.min(sessionN, 32) : model.sessionN;
+            int k = sessionK > 0 ? Math.max(1, Math.min(sessionK, n)) : Math.min(model.sessionK, n);
+            sessionN = n;
+            sessionK = k;
+            sessionDecisions.clear();
+            lagPolicy = new LagPolicy(cfgNormalMaxPing, cfgStrictMaxPing, model.lagStrictAlphaFactor, cfgMinTps);
+            mlDetector = new MlClickDetector(model::pvalues, this::onMlWindowScored);
+            getLogger().info("Motor AutoClicker '" + clickEngine + "' con " + model.description
                     + (useBundled ? " incluido en el plugin" : " personalizado (models/)")
-                    + ", umbral " + String.format(Locale.ROOT, "%.4f", mlThreshold));
+                    + String.format(Locale.ROOT, ", alpha %.3f por ventana, alarma con %d de %d ventanas, modo conservador %s",
+                    mlAlpha, sessionK, sessionN, conservativeMode ? "activo" : "desactivado"));
             if (model.demo) {
                 getLogger().warning("El modelo ML es una DEMO entrenada con datos sinteticos: usar 'shadow' hasta validarlo con datos reales.");
             }
@@ -179,23 +207,45 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // Llamado desde el hilo de ML: toda accion sobre Bukkit vuelve al hilo principal
-    private void onMlWindowScored(UUID uuid, double score, ClickFeatureExtractor.Result f) {
+    // Llamado desde el hilo de ML: la decision se toma en el hilo principal (estado por jugador sin locks)
+    private void onMlWindowScored(UUID uuid, double[] p, ClickFeatureExtractor.Result f, int pingMs, double tps) {
         if (!isEnabled()) return;
-        boolean flagged = score > mlThreshold;
-        String evidence = String.format(Locale.ROOT,
-                "score=%.3f umbral=%.3f | entropia=%.2f bits, media=%.0f ms, cv=%.2f, ac1=%.2f, max_cps=%.0f%s",
-                score, mlThreshold, f.get("entropy"), f.get("mean"), f.get("cv"), f.get("ac1"),
-                f.get("max_cps_1s"), clickModel != null && clickModel.demo ? " (modelo DEMO)" : "");
-        if (clickEngine.equals("shadow")) {
-            logMlShadowAsync(uuid, score, flagged, evidence);
+        Bukkit.getScheduler().runTask(this, () -> decideMlWindow(uuid, p, f, pingMs, tps));
+    }
+
+    private void decideMlWindow(UUID uuid, double[] p, ClickFeatureExtractor.Result f, int pingMs, double tps) {
+        ClickModel model = clickModel;
+        if (model == null) return;
+        double factor = conservativeMode ? lagPolicy.alphaFactor(pingMs, tps) : 1.0;
+        StringBuilder pv = new StringBuilder();
+        for (int i = 0; i < p.length; i++) {
+            pv.append(i == 0 ? "" : ", ").append(model.modelName(i)).append(String.format(Locale.ROOT, " p=%.4f", p[i]));
+        }
+        String stats = String.format(Locale.ROOT, "entropia=%.2f bits, media=%.0f ms, cv=%.2f, ac1=%.2f, max_cps=%.0f",
+                f.get("entropy"), f.get("mean"), f.get("cv"), f.get("ac1"), f.get("max_cps_1s"));
+        if (factor == LagPolicy.ABSTAIN) {
+            // modo conservador: la conexion o el servidor no permiten evaluar con fiabilidad (se registra)
+            if (clickEngine.equals("shadow")) {
+                logMlShadowAsync(uuid, pv.toString(), "abstencion", 0, pingMs, tps, stats);
+            }
             return;
         }
-        if (!flagged) return;
-        Bukkit.getScheduler().runTask(this, () -> {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null && p.isOnline()) flagPlayer(p, "AutoClicker-ML", evidence);
-        });
+        double alphaEff = mlAlpha * factor;
+        boolean flagged = model.flagged(p, alphaEff);
+        SessionDecision sd = sessionDecisions.computeIfAbsent(uuid, k -> new SessionDecision(sessionK, sessionN));
+        int flaggedBefore = sd.flaggedInWindow() + (flagged ? 1 : 0);
+        boolean alarm = sd.add(flagged);
+        String evidence = String.format(Locale.ROOT, "%d/%d ventanas marcadas | %s | alpha=%.4f%s | %s%s",
+                flaggedBefore, sessionN, pv, alphaEff, factor < 1.0 ? " (estricto por ping " + pingMs + " ms)" : "",
+                stats, model.demo ? " (modelo DEMO)" : "");
+        if (clickEngine.equals("shadow")) {
+            logMlShadowAsync(uuid, pv.toString(), alarm ? "alarma" : (flagged ? "ventana_marcada" : "normal"),
+                    flaggedBefore, pingMs, tps, stats);
+            return;
+        }
+        if (!alarm) return;
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null && player.isOnline()) flagPlayer(player, "AutoClicker-ML", evidence);
     }
 
     @Override
@@ -211,6 +261,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         recorder.stopSession(uuid); // NUEVO
         clickCleaners.remove(uuid);
         if (mlDetector != null) mlDetector.remove(uuid);
+        sessionDecisions.remove(uuid);
         digStarts.remove(uuid);
         violationScores.remove(uuid);
         lastAlertTime.remove(uuid);
@@ -276,9 +327,11 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         });
     }
 
-    // MODO SHADOW: se registra cada ventana puntuada por el modelo sin sumar VL (validacion en produccion)
-    private void logMlShadowAsync(UUID uuid, double score, boolean flagged, String evidence) {
+    // MODO SHADOW: se registra cada ventana evaluada por el modelo sin sumar VL (validacion en produccion)
+    private void logMlShadowAsync(UUID uuid, String pvalues, String decision, int flaggedInHistory,
+                                  int pingMs, double tps, String stats) {
         String actor = pseudonym(uuid);
+        final int k = sessionK, n = sessionN;
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
                 File f = new File(getDataFolder(), "ml_shadow.csv");
@@ -288,10 +341,10 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                     f.createNewFile();
                 }
                 try (PrintWriter out = new PrintWriter(new FileWriter(f, true))) {
-                    if (isNew) out.println("timestamp,actor,score,threshold,would_flag,evidence");
+                    if (isNew) out.println("timestamp,actor,decision,marcadas_en_historial,k,n,ping_ms,tps,pvalores,estadisticas");
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
-                    out.printf(Locale.ROOT, "%s,%s,%.4f,%.4f,%b,\"%s\"%n", timestamp, actor,
-                            score, mlThreshold, flagged, evidence.replace("\"", "'"));
+                    out.printf(Locale.ROOT, "%s,%s,%s,%d,%d,%d,%d,%.1f,\"%s\",\"%s\"%n", timestamp, actor, decision,
+                            flaggedInHistory, k, n, pingMs, tps, pvalues, stats);
                 }
             } catch (IOException e) {
                 getLogger().warning("Error escribiendo ml_shadow.csv: " + e.getMessage());
@@ -424,9 +477,13 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         UUID uuid = player.getUniqueId();
         ClickStreamCleaner.Swing swing = cleanerOf(uuid).onSwing(nowMs());
         if (swing == null) return;                                   // duplicado
-        if (mlDetector != null) mlDetector.onAccepted(uuid, swing);  // el modelo ve tambien los swings "held"
+        int ping = player.getPing();
+        double tps = recorder.getTps();
+        if (mlDetector != null) mlDetector.onAccepted(uuid, swing, ping, tps); // el modelo ve tambien los swings "held"
         if (swing.held || Double.isNaN(swing.ivMs)) return;          // minando / primer clic
         if (clickEngine.equals("ml")) return;                        // en modo ml el umbral queda de respaldo
+        // Modo conservador: con mucho lag o el servidor lento los intervalos no son fiables
+        if (conservativeMode && lagPolicy.abstain(ping, tps)) return;
 
         long diff = (long) Math.floor(swing.ivMs);
         exportTelemetryForML(uuid, diff);

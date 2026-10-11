@@ -6,6 +6,7 @@ model is the final model of evaluate.fit_final (trained on ALL synthetic partici
 
 Outputs
   results/models/click_model.onnx + click_model.json   (copied into plugin resources)
+  results/models/click_model_novelty.onnx              (second detector of the Phase I ensemble)
   plugin/src/test/resources/click_features_fixture.json (Python features + scores for Java tests)
 
     python -m src.export_onnx
@@ -48,6 +49,74 @@ def onnx_scores(path, X: np.ndarray) -> np.ndarray:
     outs = sess.run(None, {sess.get_inputs()[0].name: X.astype(np.float32)})
     prob = [o for o in outs if getattr(o, "ndim", 0) == 2][0]
     return prob[:, 1]
+
+
+def novelty_to_onnx(det):
+    """sklearn Pipeline(StandardScaler, OneClassSVM) or IsolationForest on a feature subset."""
+    from skl2onnx import convert_sklearn
+    from skl2onnx.common.data_types import FloatTensorType as SFT
+    return convert_sklearn(det.m, initial_types=[("features", SFT([None, len(det.features)]))],
+                           target_opset={"": 15, "ai.onnx.ml": 3})
+
+
+def onnx_named_output(path, X: np.ndarray, output: str, column: int) -> np.ndarray:
+    sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    names = [o.name for o in sess.get_outputs()]
+    out = sess.run(None, {sess.get_inputs()[0].name: X.astype(np.float32)})[names.index(output)]
+    out = np.asarray(out)
+    return out[:, column] if out.ndim == 2 else out
+
+
+def pvalue(sorted_cal: np.ndarray, scores: np.ndarray) -> np.ndarray:
+    n = len(sorted_cal)
+    ge = n - np.searchsorted(sorted_cal, scores, side="left")
+    return (1.0 + ge) / (n + 1.0)
+
+
+def export_ensemble(primary_path, w_parity: pd.DataFrame) -> dict | None:
+    """Second detector + p-value tables of the Phase I policy. Scores are computed with
+    onnxruntime (float32), exactly as the plugin will compute them."""
+    path = C.PROCESSED_DIR / "decision_final.joblib"
+    if not path.exists():
+        log.warning("no Phase I policy found: exporting the single model only")
+        return None
+    d = joblib.load(path)
+    pol = d["policy"]
+    cal = d["cal_windows"]
+    models = []
+    for m in pol["models"]:
+        if m == "xgb":
+            feats, file, output, column, sign = FEATURES, "click_model.onnx", "probabilities", 1, 1.0
+            onnx_path = primary_path
+        else:
+            det = d["ens_dets"][m]
+            feats, file = list(det.features), "click_model_novelty.onnx"
+            onnx_path = C.MODEL_DIR / file
+            onnx_path.write_bytes(novelty_to_onnx(det).SerializeToString())
+            # skl2onnx exposes decision_function as "scores"; our detector score is its negation
+            output, column, sign = "scores", 0, -1.0
+            py = det.score(w_parity)
+            ox = sign * onnx_named_output(onnx_path, w_parity[feats].to_numpy(np.float32), output, 0)
+            diff = float(np.max(np.abs(py - ox)))
+            log.info("%s python vs onnx max |diff| = %.2e", m, diff)
+            if diff > 1e-3:
+                raise SystemExit(f"ONNX parity failed for {m}: {diff}")
+            shutil.copy(onnx_path, C.PLUGIN_RES_DIR / "models" / file)
+        cal_scores = np.sort(sign * onnx_named_output(onnx_path, cal[feats].to_numpy(np.float32), output, column))
+        models.append({"name": m, "file": file, "features": feats, "output": output, "column": column,
+                       "sign": sign, "cal_scores": [float(v) for v in cal_scores]})
+    return {"rule": pol["rule"], "alpha": pol["alpha"], "session_k": pol["session_k"],
+            "session_n": pol["session_n"], "lag_policy": pol["lag_policy"], "models": models,
+            "calibration_human_windows": int(len(cal))}
+
+
+def ensemble_pvalues(ens: dict, X: np.ndarray) -> np.ndarray:
+    cols = []
+    for m in ens["models"]:
+        idx = [FEATURES.index(f) for f in m["features"]]
+        sc = m["sign"] * onnx_named_output(C.MODEL_DIR / m["file"], X[:, idx], m["output"], m["column"])
+        cols.append(pvalue(np.asarray(m["cal_scores"]), sc))
+    return np.vstack(cols).T
 
 
 def fixture_cases(rng) -> list[dict]:
@@ -136,9 +205,12 @@ def main() -> None:
                       "onnx_bytes": sizes,
                       "rule": "best recall@1%FPR; within 1 point -> smaller ONNX model"},
     }
-    (C.MODEL_DIR / "click_model.json").write_text(json.dumps(meta, indent=2))
     res = C.PLUGIN_RES_DIR / "models"
     res.mkdir(parents=True, exist_ok=True)
+    ens = export_ensemble(out, w)
+    if ens is not None:
+        meta["ensemble"] = ens
+    (C.MODEL_DIR / "click_model.json").write_text(json.dumps(meta, indent=2))
     shutil.copy(out, res / "click_model.onnx")
     shutil.copy(C.MODEL_DIR / "click_model.json", res / "click_model.json")
 
@@ -152,6 +224,11 @@ def main() -> None:
           "features": FEATURES, "cases": fixture_cases(rng),
           "model_samples": [{"x": [float(v) for v in r], "score": float(s)}
                             for r, s in zip(sample[FEATURES].to_numpy(np.float32), det.score(sample))]}
+    if ens is not None:
+        Xs = sample[FEATURES].to_numpy(np.float32)
+        pv = ensemble_pvalues(ens, Xs)
+        fx["ensemble_samples"] = [{"x": [float(v) for v in r], "p": [float(v) for v in pr]}
+                                  for r, pr in zip(Xs, pv)]
     tdir = C.REPO_DIR / "plugin" / "src" / "test" / "resources"
     tdir.mkdir(parents=True, exist_ok=True)
     (tdir / "click_features_fixture.json").write_text(json.dumps(fx, indent=1))

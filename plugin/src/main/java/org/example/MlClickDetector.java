@@ -25,13 +25,17 @@ public final class MlClickDetector {
 
     @FunctionalInterface
     public interface Scorer {
-        float score(float[] x) throws Exception;
+        /** p-valores calibrados, uno por modelo del ensemble. */
+        double[] score(float[] x) throws Exception;
     }
 
     @FunctionalInterface
     public interface Sink {
-        /** Llamado desde el hilo de ML; el receptor debe volver al hilo principal si toca Bukkit. */
-        void onWindowScored(UUID player, double score, ClickFeatureExtractor.Result features);
+        /**
+         * Llamado desde el hilo de ML; el receptor debe volver al hilo principal si toca Bukkit.
+         * pingMs y tps son los del momento en que se cerro la ventana (leidos en el hilo principal).
+         */
+        void onWindowScored(UUID player, double[] pvalues, ClickFeatureExtractor.Result features, int pingMs, double tps);
     }
 
     private final Scorer scorer;
@@ -54,8 +58,8 @@ public final class MlClickDetector {
                 (r, ex) -> dropped.incrementAndGet());
     }
 
-    /** Hilo principal: swing aceptado (no duplicado) del jugador. */
-    public void onAccepted(UUID player, ClickStreamCleaner.Swing swing) {
+    /** Hilo principal: swing aceptado (no duplicado) del jugador, con su ping y el TPS actual. */
+    public void onAccepted(UUID player, ClickStreamCleaner.Swing swing, int pingMs, double tps) {
         List<ClickStreamCleaner.Swing> buf = buffers.computeIfAbsent(player, k -> new ArrayList<>(WINDOW + 1));
         buf.add(swing);
         // Se espera al swing 51: asi el contador de duplicados del swing 50 ya es definitivo.
@@ -70,14 +74,14 @@ public final class MlClickDetector {
             dup[i] = s.nDup;
         }
         buf.subList(0, STRIDE).clear();
-        executor.execute(() -> score(player, t, held, dup));
+        executor.execute(() -> score(player, t, held, dup, pingMs, tps));
     }
 
-    private void score(UUID player, double[] t, boolean[] held, int[] dup) {
+    private void score(UUID player, double[] t, boolean[] held, int[] dup, int pingMs, double tps) {
         ClickFeatureExtractor.Result f = ClickFeatureExtractor.compute(t, held, dup);
         if (!f.valid || f.routedMining) return; // ventana sin clics suficientes o de minado
         try {
-            sink.onWindowScored(player, scorer.score(f.asFloat()), f);
+            sink.onWindowScored(player, scorer.score(f.asFloat()), f, pingMs, tps);
         } catch (Exception e) {
             errors.incrementAndGet();
         }
