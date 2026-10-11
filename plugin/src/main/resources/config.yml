@@ -5,6 +5,14 @@ sanciones:
 deteccion:
   autoclicker:
     max_clicks_per_second: 15
+    # Motor de deteccion de AutoClicker:
+    #   threshold -> detector original por umbral (por defecto)
+    #   shadow    -> umbral activo + el modelo ML solo se registra en ml_shadow.csv (sin VL)
+    #   ml        -> el modelo ML suma VL; si el modelo no carga se vuelve al umbral
+    # El modelo incluido es una DEMO entrenada con datos sinteticos: no usar 'ml' sin validarlo antes.
+    engine: threshold
+    # 0 = umbral calibrado del modelo (FPR 1% en humanos de calibracion); si no, valor en [0.5, 0.9999]
+    ml_threshold: 0
   fastbreak:
     min_delay_ms: 450
   speed:

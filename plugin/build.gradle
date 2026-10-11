@@ -11,6 +11,10 @@ dependencies {
     // Dependencia de Spigot o Paper API
     implementation 'org.spigotmc:spigot-api:1.18.2-R0.1-SNAPSHOT'  // Cambia si usas Paper API
 
+    // ONNX Runtime: solo para compilar; en el servidor lo aporta 'libraries' de plugin.yml
+    compileOnly 'com.microsoft.onnxruntime:onnxruntime:1.19.2'
+    testImplementation 'com.microsoft.onnxruntime:onnxruntime:1.19.2'
+
     // Dependencias de pruebas unitarias (JUnit)
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.2'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
