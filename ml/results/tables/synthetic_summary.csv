@@ -1,0 +1,7 @@
+origin,level,label,sessions,participants,accepted_swings,held,duplicates,median_iv_ms
+synthetic,gaussian,auto_jitter,72,24,141525,0,3394,53.77807799999573
+synthetic,human,human_combat,120,40,114553,0,70,147.22737400000915
+synthetic,human,human_mining,40,40,52714,49725,0,50.16122549999636
+synthetic,human_like,auto_jitter,72,24,76424,0,115,145.8036035000041
+synthetic,none,auto_fixed,72,24,140426,0,0,54.04476949999662
+synthetic,uniform,auto_jitter,72,24,148561,0,6211,52.295269000009284

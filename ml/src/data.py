@@ -134,6 +134,8 @@ def load_raw(raw_dir: Path | None = None, origin: str = "real") -> Dataset:
     sessions = sessions.copy()
     sessions["activity"] = sessions["label"].map(C.ACTIVITY)
     sessions["origin"] = origin
+    # real sessions: the "level" is the recorded label (auto_fixed / auto_jitter / human_*)
+    sessions["level"] = sessions["label"].map(lambda l: "human" if l in C.HUMAN_LABELS else f"real_{l}")
     for kind in ("clicks", "moves", "breaks"):
         out[kind] = out[kind].merge(sessions[["session_id", "participant"]], on="session_id", how="left")
         out[kind]["origin"] = origin
@@ -197,7 +199,8 @@ def build_click_streams(ds: Dataset) -> pd.DataFrame:
         out.append(s)
     cols = ["session_id", "t_ms", "iv_ms", "held", "n_dup"]
     df = pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=cols)
-    meta = ds.sessions[["session_id", "participant", "label", "activity", "origin"]]
+    meta = ds.sessions[[c for c in ["session_id", "participant", "label", "activity", "origin", "level"]
+                        if c in ds.sessions.columns]]
     return df.merge(meta, on="session_id", how="left")
 
 
