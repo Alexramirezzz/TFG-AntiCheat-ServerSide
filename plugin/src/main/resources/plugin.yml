@@ -8,7 +8,7 @@ author: Alejandro Ramirez Arias
 commands:
   ciberplugin:
     description: Comando principal de administración del anticheat
-    usage: "/ciberplugin <reload|info>"
+    usage: "/ciberplugin <reload|record>"
     permission: ciberplugin.admin
     permission-message: "§cNo tienes permisos de administrador para usar este comando."
 
