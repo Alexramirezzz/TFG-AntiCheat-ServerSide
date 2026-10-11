@@ -6,11 +6,15 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -25,7 +29,6 @@ import java.util.UUID;
 
 public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
-
     // MAPAS PARA ESTADOS Y SCORING
     // BASTIONADO: Usamos UUID en lugar de Player para evitar Memory Leaks
     private final Map<UUID, Long> lastClickTime = new HashMap<>();
@@ -37,16 +40,27 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     private int maxClicksPerSecond;
     private long minBreakDelay;
     private double maxHorizontalDist;
-    private double maxCombatReach; 
+    private double maxCombatReach;
     private int maxViolations;
+
+    // NUEVO: grabador de sesiones para el dataset
+    private SessionRecorder recorder;
+
+    // NUEVO
+    public SessionRecorder getRecorder() {
+        return recorder;
+    }
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         loadConfigValues();
 
+        recorder = new SessionRecorder(this); // NUEVO
+        recorder.open();                      // NUEVO
+
         getServer().getPluginManager().registerEvents(this, this);
-        
+
         if (getCommand("ciberplugin") != null) {
             getCommand("ciberplugin").setExecutor(new ComandosCiberPlugin(this));
         }
@@ -58,14 +72,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         int configClicks = getConfig().getInt("deteccion.autoclicker.max_clicks_per_second", 15);
         long configBreak = getConfig().getLong("deteccion.fastbreak.min_delay_ms", 500);
         double configSpeed = getConfig().getDouble("deteccion.speed.max_horizontal_distance", 1.2);
-        double configReach = getConfig().getDouble("deteccion.combat.max_reach", 3.8); 
+        double configReach = getConfig().getDouble("deteccion.combat.max_reach", 3.8);
         int configViolations = getConfig().getInt("sanciones.max_violations_before_kick", 10);
 
         // BASTIONADO: FAIL-SAFE (Validacion de limites)
-        this.maxClicksPerSecond = Math.max(5, Math.min(configClicks, 50)); 
-        this.minBreakDelay = Math.max(100L, Math.min(configBreak, 2000L)); 
+        this.maxClicksPerSecond = Math.max(5, Math.min(configClicks, 50));
+        this.minBreakDelay = Math.max(100L, Math.min(configBreak, 2000L));
         this.maxHorizontalDist = Math.max(0.5, Math.min(configSpeed, 5.0));
-        this.maxCombatReach = Math.max(3.0, Math.min(configReach, 6.0)); 
+        this.maxCombatReach = Math.max(3.0, Math.min(configReach, 6.0));
         this.maxViolations = Math.max(3, Math.min(configViolations, 50));
 
         if (configClicks != this.maxClicksPerSecond) {
@@ -75,23 +89,27 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (recorder != null) recorder.close(); // NUEVO
         getLogger().info("Proyecto_CiberPlugin DESACTIVADO.");
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
+        recorder.stopSession(uuid); // NUEVO
         lastClickTime.remove(uuid);
         lastBlockBreakTime.remove(uuid);
         violationScores.remove(uuid);
         lastAlertTime.remove(uuid);
     }
 
-
     // MOTOR DE DECISION Y SCORING
     private void flagPlayer(Player player, String cheatType, String evidence) {
         // BASTIONADO: Control de Accesos (RBAC) - Ignorar si tiene permiso
         if (player.hasPermission("ciberplugin.bypass")) return;
+
+        // NUEVO: no sancionar mientras se graba una sesion
+        if (recorder.isRecording(player.getUniqueId())) return;
 
         UUID uuid = player.getUniqueId();
         int score = violationScores.getOrDefault(uuid, 0) + 1;
@@ -101,10 +119,10 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         long now = System.currentTimeMillis();
         if (now - lastAlertTime.getOrDefault(uuid, 0L) > 1000) {
             lastAlertTime.put(uuid, now);
-            
-            String alertMsg = String.format("§8[§c!§8] §c%s §7fallo §e%s §8[VL: %d] §7(%s)", 
+
+            String alertMsg = String.format("§8[§c!§8] §c%s §7fallo §e%s §8[VL: %d] §7(%s)",
                     player.getName(), cheatType, score, evidence);
-            
+
             for (Player p : Bukkit.getOnlinePlayers()) {
                 if (p.hasPermission("ciberplugin.admin")) {
                     p.sendMessage(alertMsg);
@@ -132,11 +150,11 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                 }
                 try (PrintWriter out = new PrintWriter(new FileWriter(logFile, true))) {
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-                    
+
                     // BASTIONADO: Privacidad por Diseno
                     String seudoUUID = player.getUniqueId().toString().substring(0, 8) + "-XXXX-XXXX";
 
-                    out.printf("[%s] ALERT | Actor: %s | Cheat: %s | VL: %d | Evidencia: %s%n", 
+                    out.printf("[%s] ALERT | Actor: %s | Cheat: %s | VL: %d | Evidencia: %s%n",
                             timestamp, seudoUUID, cheatType, score, evidence);
                 }
             } catch (IOException e) {
@@ -144,7 +162,6 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
             }
         });
     }
-
 
     // EXPORTACIÓN PARA MACHINE LEARNING
     private void exportTelemetryForML(UUID uuid, long timeBetweenClicks) {
@@ -158,17 +175,16 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                 }
                 try (PrintWriter out = new PrintWriter(new FileWriter(mlFile, true))) {
                     if (isNew) out.println("timestamp,uuid_ofuscado,delay_ms,label");
-                    
+
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
                     String seudoUUID = uuid.toString().substring(0, 8);
-                    
+
                     out.printf("%s,%s,%d,unknown%n", timestamp, seudoUUID, timeBetweenClicks);
                 }
             } catch (IOException e) {
             }
         });
     }
-
 
     // DETECCIONES DE MOVIMIENTO (SPEED / FLY)
     @EventHandler
@@ -179,14 +195,20 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
         if (to == null) return;
 
+        // NUEVO: registrar movimiento (ignora giros de camara)
+        double dx = to.getX() - from.getX();
+        double dy = to.getY() - from.getY();
+        double dz = to.getZ() - from.getZ();
+        if (dx != 0 || dy != 0 || dz != 0) {
+            recorder.logMove(player, dx, dy, dz);
+        }
+
         double horizontalDistance = Math.sqrt(Math.pow(to.getX() - from.getX(), 2) + Math.pow(to.getZ() - from.getZ(), 2));
         double verticalDistance = Math.abs(to.getY() - from.getY());
 
-    
         if (horizontalDistance > maxHorizontalDist) {
             flagPlayer(player, "Speed/Movement", "Distancia H: " + String.format("%.2f", horizontalDistance));
         }
-
 
         if (!player.isOnGround() && verticalDistance > 1.0) {
             flagPlayer(player, "Fly", "Distancia V: " + String.format("%.2f", verticalDistance));
@@ -198,7 +220,6 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         }
     }
 
-
     // NUEVA DETECCIÓN DE COMBATE (REACH / KILLAURA)
     @EventHandler
     public void onPlayerAttack(EntityDamageByEntityEvent event) {
@@ -209,20 +230,25 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
             double distance = attackerLoc.distance(victimLoc);
 
-        
             if (distance > maxCombatReach) {
                 flagPlayer(attacker, "Reach/KillAura", "Distancia ataque: " + String.format("%.2f", distance) + " bloques");
             }
         }
     }
 
-
     // DETECCIONES DE AUTOMATIZACIÓN (CLICS)
+    // CAMBIADO: solo clics izquierdos de la mano principal (antes contaba tambien clics derechos y disparaba dos veces)
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent event) {
+        Action action = event.getAction();
+        if (action != Action.LEFT_CLICK_AIR && action != Action.LEFT_CLICK_BLOCK) return;
+        if (event.getHand() != EquipmentSlot.HAND) return;
+
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
         long current = System.currentTimeMillis();
+
+        recorder.logClick(player, action == Action.LEFT_CLICK_AIR ? "interact_air" : "interact_block");
 
         if (lastClickTime.containsKey(uuid)) {
             long last = lastClickTime.get(uuid);
@@ -237,11 +263,20 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         lastClickTime.put(uuid, current);
     }
 
+    // NUEVO: registrar el swing del brazo como fuente alternativa de clic
+    @EventHandler
+    public void onSwing(PlayerAnimationEvent event) {
+        if (event.getAnimationType() != PlayerAnimationType.ARM_SWING) return;
+        recorder.logClick(event.getPlayer(), "swing");
+    }
+
     @EventHandler
     public void onBlockBreak(BlockBreakEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
         long current = System.currentTimeMillis();
+
+        recorder.logBreak(player); // NUEVO
 
         if (lastBlockBreakTime.containsKey(uuid)) {
             long last = lastBlockBreakTime.get(uuid);
@@ -253,9 +288,9 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         }
         lastBlockBreakTime.put(uuid, current);
     }
-    
+
     public void reloadPluginConfig() {
-        reloadConfig(); 
-        loadConfigValues(); 
+        reloadConfig();
+        loadConfigValues();
     }
 }

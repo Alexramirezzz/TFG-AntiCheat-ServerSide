@@ -3,3 +3,16 @@
 
 # Ignore Gradle build output directory
 build
+bin/
+ml/data/raw/
+
+# ML extension: real data, derived data and local environment must never be committed
+ml/data/raw/
+ml/data/processed/
+ml/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Thesis PDF is not versioned
+docs/TFG.pdf
+docs/*.pdf
