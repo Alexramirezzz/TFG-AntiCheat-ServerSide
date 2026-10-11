@@ -7,9 +7,10 @@ measurements taken on a real client–server setup.
 
 ## Hypotheses from the simulation
 
-* Per-packet jitter of 8–25 ms is enough to break the held-button rule. Held swings are expected
-  every 50 ± 15 ms, so with that jitter mining swings leak into the "active click" stream and the
-  original 66 ms rule flags a legitimate player (`ml/results/phase_f_results.md`).
+* Per-packet jitter spreads held swings beyond the held tolerance (≤ 65 ms, with one late swing
+  up to 85 ms tolerated), so some mining swings leak into the "active click" stream and the
+  original 66 ms rule flags a legitimate player. On the real session with simulated lag this gives
+  1.6 / 6.65 / 9.15 false violations at ping 80 / 150 / 250 ms (`ml/results/phase_f_results.md`).
 * Lag spikes release queued packets together, which looks like same-tick double clicks
   (`dup_frac`). Some models' FPR rises with ping (DEMO).
 

@@ -18,6 +18,11 @@ public final class ClickStreamCleaner {
     public static final double DEDUP_MS = 15.0;
     public static final double HELD_MAX_IV_MS = 65.0;
     public static final double FRESH_DIG_MS = 15.0;
+    /**
+     * Un hueco mayor significa que se solto el boton. Un tick lento suelto (p. ej. 67 ms) no corta la
+     * excavacion, pero un tick saltado (~100 ms) si: asi un autoclicker que alterna 50/100 ms no pasa por minado.
+     */
+    public static final double RELEASE_GAP_MS = 85.0;
 
     /** Resultado de procesar un swing. */
     public static final class Swing {
@@ -58,7 +63,9 @@ public final class ClickStreamCleaner {
         double iv = last == null ? Double.NaN : tMs - last.tMs;
         boolean fresh = (tMs - lastDig) <= FRESH_DIG_MS;
         boolean held = digging && !Double.isNaN(iv) && iv <= HELD_MAX_IV_MS && (!fresh || prevHeld);
-        if (!held && !fresh) {
+        // Un swing tardio (65 < iv <= 85 ms, p. ej. un tick lento) se evalua como clic pero no corta la
+        // excavacion: solo un hueco > RELEASE_GAP_MS indica que se ha soltado el boton.
+        if (!fresh && (Double.isNaN(iv) || iv > RELEASE_GAP_MS)) {
             digging = false;
         }
         prevHeld = held;

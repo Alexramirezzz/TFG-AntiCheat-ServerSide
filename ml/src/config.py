@@ -32,6 +32,9 @@ TICK_MS = 50.0              # one game tick at 20 TPS (client and server)
 DEDUP_MS = 15.0             # swings closer than this to the last accepted swing are duplicates
 HELD_MAX_IV_MS = 65.0       # swing-to-swing interval compatible with "button held" (1 tick + jitter)
 FRESH_DIG_MS = 15.0         # a swing within this time of an interact_block belongs to that dig start
+RELEASE_GAP_MS = 85.0       # a gap longer than this means the button was released. One late tick
+                            # (e.g. 67 ms on a slow server tick) does not end the dig, but a skipped
+                            # tick (~100 ms) does, so a clicker alternating 50/100 ms is not held.
 PAUSE_MS = 1000.0           # intervals above this are pauses, excluded from distribution stats
 TRIM_MOVES_S = 5.0          # spawn / gravity-drop trim at the start of each session (moves)
 

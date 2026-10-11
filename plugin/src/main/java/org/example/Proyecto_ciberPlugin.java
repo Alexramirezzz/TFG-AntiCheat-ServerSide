@@ -1,6 +1,7 @@
 package org.example;
 
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
@@ -34,13 +35,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // BASTIONADO: Usamos UUID en lugar de Player para evitar Memory Leaks
     // Limpieza del flujo de clics (swing + de-duplicacion + boton mantenido), una por jugador
     private final Map<UUID, ClickStreamCleaner> clickCleaners = new HashMap<>();
-    private final Map<UUID, Long> lastBlockBreakTime = new HashMap<>();
+    // FastBreak: inicio de la excavacion actual (bloque, instante y velocidad de rotura)
+    private final Map<UUID, DigStart> digStarts = new HashMap<>();
     private final Map<UUID, Integer> violationScores = new HashMap<>();
     private final Map<UUID, Long> lastAlertTime = new HashMap<>();
 
     // Umbrales en memoria
     private int maxClicksPerSecond;
-    private long minBreakDelay;
+    private double fastBreakTolerance;
     private double maxHorizontalDist;
     private double maxCombatReach;
     private int maxViolations;
@@ -52,6 +54,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // modelo ML solo se registra (sin VL); ml = el modelo ML suma VL y el umbral queda como respaldo.
     private volatile String clickEngine = "threshold";   // leido tambien desde el hilo de ML
     private double mlThresholdOverride;
+    private boolean mlCustomModel;        // true = respetar el modelo de la carpeta del plugin
     private MlClickDetector mlDetector;   // null si el motor ML no esta activo o no pudo cargarse
     private volatile ClickModel clickModel;
     private volatile double mlThreshold;
@@ -85,14 +88,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
     private void loadConfigValues() {
         int configClicks = getConfig().getInt("deteccion.autoclicker.max_clicks_per_second", 15);
-        long configBreak = getConfig().getLong("deteccion.fastbreak.min_delay_ms", 500);
+        double configBreakTol = getConfig().getDouble("deteccion.fastbreak.tolerance", 0.7);
         double configSpeed = getConfig().getDouble("deteccion.speed.max_horizontal_distance", 1.2);
         double configReach = getConfig().getDouble("deteccion.combat.max_reach", 3.8);
         int configViolations = getConfig().getInt("sanciones.max_violations_before_kick", 10);
 
         // BASTIONADO: FAIL-SAFE (Validacion de limites)
         this.maxClicksPerSecond = Math.max(5, Math.min(configClicks, 50));
-        this.minBreakDelay = Math.max(100L, Math.min(configBreak, 2000L));
+        this.fastBreakTolerance = Math.max(0.3, Math.min(configBreakTol, 1.0));
         this.maxHorizontalDist = Math.max(0.5, Math.min(configSpeed, 5.0));
         this.maxCombatReach = Math.max(3.0, Math.min(configReach, 6.0));
         this.maxViolations = Math.max(3, Math.min(configViolations, 50));
@@ -111,6 +114,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         double thr = getConfig().getDouble("deteccion.autoclicker.ml_threshold", 0.0);
         // 0 = usar el umbral calibrado del modelo; si se fija a mano se limita a [0.5, 0.9999]
         this.mlThresholdOverride = thr <= 0 ? 0 : Math.max(0.5, Math.min(thr, 0.9999));
+        this.mlCustomModel = getConfig().getBoolean("deteccion.autoclicker.ml_custom_model", false);
     }
 
     // BASTIONADO: clave HMAC en config.yml (privacidad.hmac_key). Si falta o es invalida se genera una
@@ -134,14 +138,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         if (clickEngine.equals("threshold")) return;
         try {
             File dir = new File(getDataFolder(), "models");
-            if (!new File(dir, "click_model.onnx").exists()) saveResource("models/click_model.onnx", false);
-            if (!new File(dir, "click_model.json").exists()) saveResource("models/click_model.json", false);
+            // Por defecto se usa siempre el modelo incluido en el jar (asi un jar nuevo trae su modelo nuevo).
+            // Con ml_custom_model: true se respetan los ficheros que el administrador haya puesto en models/.
+            boolean useBundled = !mlCustomModel || !new File(dir, "click_model.onnx").exists()
+                    || !new File(dir, "click_model.json").exists();
+            if (useBundled) {
+                saveResource("models/click_model.onnx", true);
+                saveResource("models/click_model.json", true);
+            }
             clickModel = ClickModel.load(new File(dir, "click_model.onnx").toPath(),
                     new File(dir, "click_model.json").toPath());
             mlThreshold = mlThresholdOverride > 0 ? mlThresholdOverride : clickModel.threshold;
             final ClickModel model = clickModel;
             mlDetector = new MlClickDetector(model::score, this::onMlWindowScored);
             getLogger().info("Motor AutoClicker '" + clickEngine + "' con modelo " + model.description
+                    + (useBundled ? " incluido en el plugin" : " personalizado (models/)")
                     + ", umbral " + String.format(Locale.ROOT, "%.4f", mlThreshold));
             if (model.demo) {
                 getLogger().warning("El modelo ML es una DEMO entrenada con datos sinteticos: usar 'shadow' hasta validarlo con datos reales.");
@@ -200,7 +211,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         recorder.stopSession(uuid); // NUEVO
         clickCleaners.remove(uuid);
         if (mlDetector != null) mlDetector.remove(uuid);
-        lastBlockBreakTime.remove(uuid);
+        digStarts.remove(uuid);
         violationScores.remove(uuid);
         lastAlertTime.remove(uuid);
     }
@@ -332,15 +343,20 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
             recorder.logMove(player, dx, dy, dz);
         }
 
+        // CORREGIDO: en creativo/espectador, volando, con elitros, con tridente (riptide) o en un vehiculo el
+        // movimiento es legitimo aunque supere los limites de un jugador a pie.
+        if (isMovementExempt(player)) return;
+
         double horizontalDistance = Math.sqrt(Math.pow(to.getX() - from.getX(), 2) + Math.pow(to.getZ() - from.getZ(), 2));
-        double verticalDistance = Math.abs(to.getY() - from.getY());
 
         if (horizontalDistance > maxHorizontalDist) {
             flagPlayer(player, "Speed/Movement", "Distancia H: " + String.format("%.2f", horizontalDistance));
         }
 
-        if (!player.isOnGround() && verticalDistance > 1.0) {
-            flagPlayer(player, "Fly", "Distancia V: " + String.format("%.2f", verticalDistance));
+        // CORREGIDO: antes se usaba |dy| y una caida normal (mas de ~5 bloques) superaba 1 bloque/tick.
+        // Solo se marca un ascenso anomalo: un salto normal sube 0.42 bloques/tick.
+        if (!player.isOnGround() && dy > 1.0) {
+            flagPlayer(player, "Fly", "Ascenso V: " + String.format("%.2f", dy));
         }
 
         Block block = to.getBlock();
@@ -382,7 +398,20 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
         if (action == Action.LEFT_CLICK_BLOCK) {
             cleanerOf(player.getUniqueId()).onDigMarker(nowMs());
+            Block clicked = event.getClickedBlock();
+            if (clicked != null) {
+                digStarts.put(player.getUniqueId(), new DigStart(clicked, nowMs(), clicked.getBreakSpeed(player)));
+            }
         }
+    }
+
+    // Inicio de una excavacion: bloque, instante (ms) y velocidad de rotura en ese momento
+    private record DigStart(Block block, double tMs, float speed) { }
+
+    private static boolean isMovementExempt(Player p) {
+        GameMode gm = p.getGameMode();
+        return gm == GameMode.CREATIVE || gm == GameMode.SPECTATOR || p.getAllowFlight() || p.isFlying()
+                || p.isGliding() || p.isRiptiding() || p.isInsideVehicle();
     }
 
     // El swing del brazo es la fuente del clic
@@ -419,20 +448,25 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     public void onBlockBreak(BlockBreakEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
-        long current = System.currentTimeMillis();
+        double now = nowMs();
 
         recorder.logBreak(player); // NUEVO
-        cleanerOf(uuid).onDigMarker(nowMs()); // la rotura tambien abre/continua una excavacion
+        cleanerOf(uuid).onDigMarker(now); // la rotura tambien abre/continua una excavacion
 
-        if (lastBlockBreakTime.containsKey(uuid)) {
-            long last = lastBlockBreakTime.get(uuid);
-            long diff = current - last;
-
-            if (diff < minBreakDelay) {
-                flagPlayer(player, "FastBreak", "Break delay: " + diff + "ms");
-            }
+        // CORREGIDO: antes se comparaba el tiempo entre roturas con 450 ms fijos, lo que marcaba bloques que
+        // se rompen al instante, herramientas con eficiencia y el modo creativo. Ahora se compara el tiempo
+        // de excavacion de ESTE bloque con el que corresponde a su dureza, la herramienta y los efectos.
+        DigStart start = digStarts.remove(uuid);
+        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) return;
+        Block block = event.getBlock();
+        if (start == null || !start.block().equals(block)) return; // sin inicio conocido: no hay evidencia
+        double elapsed = now - start.tMs();
+        float speedEnd = block.getBreakSpeed(player);
+        if (FastBreakCheck.tooFast(elapsed, start.speed(), speedEnd, fastBreakTolerance)) {
+            double expected = FastBreakCheck.expectedMs(Math.max(start.speed(), speedEnd));
+            flagPlayer(player, "FastBreak", String.format(Locale.ROOT, "Rotura en %.0f ms (esperado %.0f ms, %s)",
+                    elapsed, expected, block.getType().name()));
         }
-        lastBlockBreakTime.put(uuid, current);
     }
 
     public void reloadPluginConfig() {

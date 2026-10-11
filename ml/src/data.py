@@ -155,7 +155,9 @@ def clean_click_stream(clicks: pd.DataFrame, breaks: pd.DataFrame | None = None)
          interact_block | break -> digging = True, last_dig = t
          swing          -> fresh = t - last_dig <= FRESH_DIG_MS
                            held  = digging and iv <= HELD_MAX_IV_MS and (not fresh or prev_held)
-                           if not held and not fresh: digging = False
+                           if not fresh and iv > RELEASE_GAP_MS: digging = False
+       A late held swing (HELD_MAX_IV_MS < iv <= RELEASE_GAP_MS = 85 ms, e.g. one slow server tick) is
+       evaluated as a click but does not end the dig, so the rest of the run stays held.
     Returns one row per accepted swing: t_ms, iv_ms (NaN for the first), held, n_dup.
     """
     ev = [(float(t) / 1e6, src) for t, src in zip(clicks["t_ns"], clicks["source"])]
@@ -180,7 +182,7 @@ def clean_click_stream(clicks: pd.DataFrame, breaks: pd.DataFrame | None = None)
             fresh = (t - last_dig) <= C.FRESH_DIG_MS
             held = bool(digging and not math.isnan(iv) and iv <= C.HELD_MAX_IV_MS
                         and (not fresh or prev_held))
-            if not held and not fresh:
+            if not fresh and (math.isnan(iv) or iv > C.RELEASE_GAP_MS):
                 digging = False
             prev_held = held
             rows.append([t, iv, held, 0])
