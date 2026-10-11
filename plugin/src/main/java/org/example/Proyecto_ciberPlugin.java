@@ -31,7 +31,8 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
 
     // MAPAS PARA ESTADOS Y SCORING
     // BASTIONADO: Usamos UUID en lugar de Player para evitar Memory Leaks
-    private final Map<UUID, Long> lastClickTime = new HashMap<>();
+    // Limpieza del flujo de clics (swing + de-duplicacion + boton mantenido), una por jugador
+    private final Map<UUID, ClickStreamCleaner> clickCleaners = new HashMap<>();
     private final Map<UUID, Long> lastBlockBreakTime = new HashMap<>();
     private final Map<UUID, Integer> violationScores = new HashMap<>();
     private final Map<UUID, Long> lastAlertTime = new HashMap<>();
@@ -97,7 +98,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
         recorder.stopSession(uuid); // NUEVO
-        lastClickTime.remove(uuid);
+        clickCleaners.remove(uuid);
         lastBlockBreakTime.remove(uuid);
         violationScores.remove(uuid);
         lastAlertTime.remove(uuid);
@@ -237,7 +238,11 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     }
 
     // DETECCIONES DE AUTOMATIZACIÓN (CLICS)
-    // CAMBIADO: solo clics izquierdos de la mano principal (antes contaba tambien clics derechos y disparaba dos veces)
+    // CORREGIDO: un clic fisico genera hasta 3 eventos en ~5 ms (LEFT_CLICK_BLOCK, LEFT_CLICK_AIR y el
+    // swing), y medir intervalos entre eventos de interaccion daba falsos positivos. Ahora:
+    //  - el clic es el swing del brazo (onSwing), de-duplicado a 15 ms;
+    //  - LEFT_CLICK_BLOCK y las roturas solo marcan una excavacion, para no evaluar los swings que el
+    //    cliente genera cada tick mientras se mantiene pulsado el boton (minar).
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent event) {
         Action action = event.getAction();
@@ -245,29 +250,38 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         if (event.getHand() != EquipmentSlot.HAND) return;
 
         Player player = event.getPlayer();
-        UUID uuid = player.getUniqueId();
-        long current = System.currentTimeMillis();
-
         recorder.logClick(player, action == Action.LEFT_CLICK_AIR ? "interact_air" : "interact_block");
 
-        if (lastClickTime.containsKey(uuid)) {
-            long last = lastClickTime.get(uuid);
-            long diff = current - last;
-
-            exportTelemetryForML(uuid, diff);
-
-            if (diff > 0 && diff < (1000 / maxClicksPerSecond)) {
-                flagPlayer(player, "AutoClicker", "Click delay: " + diff + "ms");
-            }
+        if (action == Action.LEFT_CLICK_BLOCK) {
+            cleanerOf(player.getUniqueId()).onDigMarker(nowMs());
         }
-        lastClickTime.put(uuid, current);
     }
 
-    // NUEVO: registrar el swing del brazo como fuente alternativa de clic
+    // El swing del brazo es la fuente del clic
     @EventHandler
     public void onSwing(PlayerAnimationEvent event) {
         if (event.getAnimationType() != PlayerAnimationType.ARM_SWING) return;
-        recorder.logClick(event.getPlayer(), "swing");
+        Player player = event.getPlayer();
+        recorder.logClick(player, "swing");
+
+        UUID uuid = player.getUniqueId();
+        ClickStreamCleaner.Swing swing = cleanerOf(uuid).onSwing(nowMs());
+        if (swing == null || swing.held || Double.isNaN(swing.ivMs)) return; // duplicado / minando / primer clic
+
+        long diff = (long) Math.floor(swing.ivMs);
+        exportTelemetryForML(uuid, diff);
+
+        if (diff > 0 && diff < (1000 / maxClicksPerSecond)) {
+            flagPlayer(player, "AutoClicker", "Click delay: " + diff + "ms");
+        }
+    }
+
+    private ClickStreamCleaner cleanerOf(UUID uuid) {
+        return clickCleaners.computeIfAbsent(uuid, k -> new ClickStreamCleaner());
+    }
+
+    private static double nowMs() {
+        return System.nanoTime() / 1_000_000.0;
     }
 
     @EventHandler
@@ -277,6 +291,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         long current = System.currentTimeMillis();
 
         recorder.logBreak(player); // NUEVO
+        cleanerOf(uuid).onDigMarker(nowMs()); // la rotura tambien abre/continua una excavacion
 
         if (lastBlockBreakTime.containsKey(uuid)) {
             long last = lastBlockBreakTime.get(uuid);
