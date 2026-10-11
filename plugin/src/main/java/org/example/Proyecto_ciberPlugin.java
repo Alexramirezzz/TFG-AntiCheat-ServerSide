@@ -54,6 +54,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     // modelo ML solo se registra (sin VL); ml = el modelo ML suma VL y el umbral queda como respaldo.
     private volatile String clickEngine = "threshold";   // leido tambien desde el hilo de ML
     private double mlThresholdOverride;
+    private boolean mlCustomModel;        // true = respetar el modelo de la carpeta del plugin
     private MlClickDetector mlDetector;   // null si el motor ML no esta activo o no pudo cargarse
     private volatile ClickModel clickModel;
     private volatile double mlThreshold;
@@ -113,6 +114,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         double thr = getConfig().getDouble("deteccion.autoclicker.ml_threshold", 0.0);
         // 0 = usar el umbral calibrado del modelo; si se fija a mano se limita a [0.5, 0.9999]
         this.mlThresholdOverride = thr <= 0 ? 0 : Math.max(0.5, Math.min(thr, 0.9999));
+        this.mlCustomModel = getConfig().getBoolean("deteccion.autoclicker.ml_custom_model", false);
     }
 
     // BASTIONADO: clave HMAC en config.yml (privacidad.hmac_key). Si falta o es invalida se genera una
@@ -136,14 +138,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         if (clickEngine.equals("threshold")) return;
         try {
             File dir = new File(getDataFolder(), "models");
-            if (!new File(dir, "click_model.onnx").exists()) saveResource("models/click_model.onnx", false);
-            if (!new File(dir, "click_model.json").exists()) saveResource("models/click_model.json", false);
+            // Por defecto se usa siempre el modelo incluido en el jar (asi un jar nuevo trae su modelo nuevo).
+            // Con ml_custom_model: true se respetan los ficheros que el administrador haya puesto en models/.
+            boolean useBundled = !mlCustomModel || !new File(dir, "click_model.onnx").exists()
+                    || !new File(dir, "click_model.json").exists();
+            if (useBundled) {
+                saveResource("models/click_model.onnx", true);
+                saveResource("models/click_model.json", true);
+            }
             clickModel = ClickModel.load(new File(dir, "click_model.onnx").toPath(),
                     new File(dir, "click_model.json").toPath());
             mlThreshold = mlThresholdOverride > 0 ? mlThresholdOverride : clickModel.threshold;
             final ClickModel model = clickModel;
             mlDetector = new MlClickDetector(model::score, this::onMlWindowScored);
             getLogger().info("Motor AutoClicker '" + clickEngine + "' con modelo " + model.description
+                    + (useBundled ? " incluido en el plugin" : " personalizado (models/)")
                     + ", umbral " + String.format(Locale.ROOT, "%.4f", mlThreshold));
             if (model.demo) {
                 getLogger().warning("El modelo ML es una DEMO entrenada con datos sinteticos: usar 'shadow' hasta validarlo con datos reales.");
