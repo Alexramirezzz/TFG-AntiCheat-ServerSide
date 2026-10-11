@@ -56,6 +56,9 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     private ClickModel clickModel;
     private double mlThreshold;
 
+    // BASTIONADO: seudonimizacion con clave (HMAC-SHA256) para auditoria y telemetria
+    private volatile Pseudonymizer pseudonymizer;
+
     // NUEVO
     public SessionRecorder getRecorder() {
         return recorder;
@@ -65,6 +68,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         loadConfigValues();
+        loadPseudonymizer();
 
         recorder = new SessionRecorder(this); // NUEVO
         recorder.open();                      // NUEVO
@@ -107,6 +111,21 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         double thr = getConfig().getDouble("deteccion.autoclicker.ml_threshold", 0.0);
         // 0 = usar el umbral calibrado del modelo; si se fija a mano se limita a [0.5, 0.9999]
         this.mlThresholdOverride = thr <= 0 ? 0 : Math.max(0.5, Math.min(thr, 0.9999));
+    }
+
+    // BASTIONADO: clave HMAC en config.yml (privacidad.hmac_key). Si falta o es invalida se genera una
+    // nueva con SecureRandom y se guarda; nunca se escribe en los logs.
+    private void loadPseudonymizer() {
+        byte[] key = Pseudonymizer.decodeKey(getConfig().getString("privacidad.hmac_key", ""));
+        if (key == null) {
+            String fresh = Pseudonymizer.generateKey();
+            getConfig().set("privacidad.hmac_key", fresh);
+            saveConfig();
+            key = Pseudonymizer.decodeKey(fresh);
+            getLogger().warning("AUDITORIA SEGURIDAD: generada una nueva clave de seudonimizacion (privacidad.hmac_key). "
+                    + "Los seudonimos anteriores no se pueden enlazar con los nuevos. No compartas esta clave.");
+        }
+        this.pseudonymizer = new Pseudonymizer(key);
     }
 
     // MOTOR ML: carga el modelo ONNX y, ante cualquier fallo, vuelve al detector por umbral (fail-safe)
@@ -224,6 +243,8 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     }
 
     private void logViolationAsync(Player player, String cheatType, String evidence, int score) {
+        // Seudonimo calculado en el hilo principal (no se accede al objeto Player desde el hilo asincrono)
+        final String actor = pseudonym(player.getUniqueId());
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
                 File logFile = new File(getDataFolder(), "auditoria.log");
@@ -234,11 +255,9 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                 try (PrintWriter out = new PrintWriter(new FileWriter(logFile, true))) {
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
 
-                    // BASTIONADO: Privacidad por Diseno
-                    String seudoUUID = player.getUniqueId().toString().substring(0, 8) + "-XXXX-XXXX";
-
+                    // BASTIONADO: Privacidad por Diseno (seudonimo HMAC-SHA256 con clave, no UUID recortado)
                     out.printf("[%s] ALERT | Actor: %s | Cheat: %s | VL: %d | Evidencia: %s%n",
-                            timestamp, seudoUUID, cheatType, score, evidence);
+                            timestamp, actor, cheatType, score, evidence);
                 }
             } catch (IOException e) {
                 getLogger().warning("Error escribiendo auditoria forense: " + e.getMessage());
@@ -269,13 +288,14 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
         });
     }
 
-    // Seudonimo del jugador para los registros
+    // Seudonimo del jugador para los registros (HMAC-SHA256 con la clave secreta del servidor)
     private String pseudonym(UUID uuid) {
-        return uuid.toString().substring(0, 8) + "-XXXX-XXXX";
+        return pseudonymizer.pseudonym(uuid);
     }
 
     // EXPORTACIÓN PARA MACHINE LEARNING
     private void exportTelemetryForML(UUID uuid, long timeBetweenClicks) {
+        final String actor = pseudonym(uuid);
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
                 File mlFile = new File(getDataFolder(), "telemetria_ml.csv");
@@ -288,9 +308,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
                     if (isNew) out.println("timestamp,uuid_ofuscado,delay_ms,label");
 
                     String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
-                    String seudoUUID = uuid.toString().substring(0, 8);
-
-                    out.printf("%s,%s,%d,unknown%n", timestamp, seudoUUID, timeBetweenClicks);
+                    out.printf("%s,%s,%d,unknown%n", timestamp, actor, timeBetweenClicks);
                 }
             } catch (IOException e) {
             }
@@ -420,6 +438,7 @@ public class Proyecto_ciberPlugin extends JavaPlugin implements Listener {
     public void reloadPluginConfig() {
         reloadConfig();
         loadConfigValues();
+        loadPseudonymizer();
         initMlEngine();
     }
 }

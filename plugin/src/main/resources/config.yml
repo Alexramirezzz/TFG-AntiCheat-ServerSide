@@ -17,3 +17,10 @@ deteccion:
     min_delay_ms: 450
   speed:
     max_horizontal_distance: 0.1
+
+privacidad:
+  # Clave secreta para seudonimizar jugadores en auditoria.log, telemetria_ml.csv y ml_shadow.csv
+  # (HMAC-SHA256 del UUID). Se genera automaticamente en el primer arranque si esta vacia.
+  # NO la compartas ni la subas a git: con ella se pueden recalcular los seudonimos.
+  # Cambiarla hace que los seudonimos nuevos no se puedan enlazar con los antiguos.
+  hmac_key: ""
