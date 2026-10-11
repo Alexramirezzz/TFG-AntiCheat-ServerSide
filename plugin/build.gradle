@@ -14,6 +14,13 @@ dependencies {
     // Dependencias de pruebas unitarias (JUnit)
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.2'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.2'
+    // Gradle 9 ya no aporta el launcher de JUnit Platform
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.7.2'
+}
+
+// Tests unitarios con JUnit 5 (limpieza de clics, features, modelo ONNX, seudonimizacion)
+tasks.named('test') {
+    useJUnitPlatform()
 }
 
 java {
