@@ -1,0 +1,2 @@
+session_id,participant,label,naive_java_interact_n,naive_java_interact_flags,naive_all_events_n,naive_all_events_flags,dedup_swing_n,dedup_swing_flags,cleaned_active_n,cleaned_active_flags,breaks_intervals_n,fastbreak_flags,moves_untrimmed_n,speed1.2_flags_untrimmed,speed0.5_flags_untrimmed,fly_flags_untrimmed,moves_trimmed_n,speed1.2_flags,speed0.5_flags,fly_flags
+ea738255,P01,human_unspecified,33,1,110,59,76,56,20,0,23,15,649,0,70,7,608,0,70,7
