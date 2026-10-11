@@ -42,7 +42,9 @@ def calibration_from_real() -> tuple[NetParams, dict, dict]:
 
 def concat_ds(parts: list[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]) -> Dataset:
     cl = pd.concat([p[0] for p in parts], ignore_index=True)
-    br = pd.concat([p[1] for p in parts if len(p[1])], ignore_index=True)
+    nonempty = [p[1] for p in parts if len(p[1])]
+    br = pd.concat(nonempty, ignore_index=True) if nonempty else         pd.DataFrame({"session_id": pd.Series(dtype=str), "t_ns": pd.Series(dtype="int64"),
+                      "label": pd.Series(dtype=str)})
     ss = pd.concat([p[2] for p in parts], ignore_index=True)
     ss["origin"] = "synthetic"
     for df in (cl, br):
