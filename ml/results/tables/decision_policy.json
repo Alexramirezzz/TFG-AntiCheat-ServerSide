@@ -1,0 +1,102 @@
+{
+  "rule": "xgb+ocsvm_robust",
+  "models": [
+    "xgb",
+    "ocsvm_robust"
+  ],
+  "alpha": 0.01,
+  "session_k": 3,
+  "session_n": 8,
+  "lag_policy": {
+    "normal_max_ping": 80,
+    "strict_max_ping": 150,
+    "strict_alpha_factor": 0.25
+  },
+  "k_selection_calibration_alarm_rates": {
+    "1": 0.2,
+    "2": 0.03333333333333333,
+    "3": 0.0
+  },
+  "selection": [
+    {
+      "rule": "xgb+ocsvm",
+      "clean_fpr": 0.008170676350431231,
+      "max_fpr_ping_le_80": 1.0,
+      "recall_vs_self": 0.0392156862745098,
+      "eligible": false
+    },
+    {
+      "rule": "xgb+iforest",
+      "clean_fpr": 0.006128007262823422,
+      "max_fpr_ping_le_80": 0.022844827586206897,
+      "recall_vs_self": 0.009116231957457584,
+      "eligible": false
+    },
+    {
+      "rule": "xgb+ocsvm_robust",
+      "clean_fpr": 0.007943713118474808,
+      "max_fpr_ping_le_80": 0.016810344827586206,
+      "recall_vs_self": 0.029154518950437316,
+      "eligible": true
+    },
+    {
+      "rule": "xgb+iforest_robust",
+      "clean_fpr": 0.010213345438039038,
+      "max_fpr_ping_le_80": 0.015158077089649198,
+      "recall_vs_self": 0.0041412911084043845,
+      "eligible": true
+    }
+  ],
+  "optimized_params": {
+    "opt_vs_xgb": {
+      "median_ms": 40.0,
+      "spread": 0.6611428244747519,
+      "rho": -0.15208159182262382,
+      "pause_prob": 0.1507066530166503,
+      "pause_median_ms": 192.69630649345942,
+      "opt_score": 0.40075378852276855,
+      "opt_cps": 12.647337395406415,
+      "min_cps": 12.0
+    },
+    "opt_vs_xgb+ocsvm": {
+      "median_ms": 76.23521340430823,
+      "spread": 0.1290607643709761,
+      "rho": 0.31877599486690666,
+      "pause_prob": 0.14618548217252073,
+      "pause_median_ms": 100.0,
+      "opt_score": 0.7639607762903368,
+      "opt_cps": 11.016691926657094,
+      "min_cps": 12.0
+    },
+    "opt_vs_xgb+iforest": {
+      "median_ms": 40.0,
+      "spread": 0.5351403385592034,
+      "rho": 0.21036359291999684,
+      "pause_prob": 0.3,
+      "pause_median_ms": 115.31880948284915,
+      "opt_score": 1.360691887146956,
+      "opt_cps": 12.012683164188152,
+      "min_cps": 12.0
+    },
+    "opt_vs_xgb+ocsvm_robust": {
+      "median_ms": 60.748819021532434,
+      "spread": 0.8,
+      "rho": -0.4808156985704096,
+      "pause_prob": 0.0,
+      "pause_median_ms": 364.84290106654134,
+      "opt_score": 0.794761873042334,
+      "opt_cps": 12.050683606297065,
+      "min_cps": 12.0
+    },
+    "opt_vs_xgb+iforest_robust": {
+      "median_ms": 55.68995555681,
+      "spread": 0.8,
+      "rho": 0.24233569938999322,
+      "pause_prob": 0.05775641728727347,
+      "pause_median_ms": 100.0,
+      "opt_score": 0.38549409954773556,
+      "opt_cps": 12.258026345969766,
+      "min_cps": 12.0
+    }
+  }
+}

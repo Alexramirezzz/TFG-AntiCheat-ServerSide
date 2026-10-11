@@ -44,7 +44,11 @@ No real window survives cleaning, so no real detection metric can be reported ye
 - after adversarial training, a re-optimised adversary still evades half the windows;
 - simulated lag raises the FPR of several models.
 
-The trained model is exported to ONNX and integrated in the plugin off the main thread, behind a
+A decision policy turns these findings into deployment rules. Calibrated p-values feed an
+XGBoost + One-Class SVM ensemble, an alarm needs 3 of the last 8 windows, and a conservative
+mode reacts to lag. It also exposes a trade-off: a novelty detector is only robust to lag
+without network features, and without them it loses most of its power against the adaptive
+attacker. The policy is exported to ONNX and runs in the plugin off the main thread, behind a
 fail-safe switch that defaults to the original detector.
 
 ## 1. Introduction and threat model
@@ -347,6 +351,73 @@ human**, driven by an extreme kurtosis (38.9) from one long interval. It shows w
 belong in the audit trail: a reviewer can see that the evidence is a single outlier, not
 machine-like regularity.
 
+### 5.5 Decision policy: ensemble, session-level alarm and conservative mode (DEMO)
+
+Sections 5.2 and 5.3 point in two directions. Heterogeneous detectors resist an adversary tuned
+against one of them, and lag inflates false positives. Phase I (`ml/src/decision.py`) turns
+both findings into a policy and measures it.
+
+**Calibrated p-values.** For each detector, a window's score becomes
+p = (1 + #{calibration human windows with score ≥ s}) / (n + 1), the fraction of human windows
+that look at least as machine-like. A window is flagged if min p < α / M (α = 1%, Bonferroni
+over M detectors). With n = 1,086 calibration windows the smallest possible p is 0.00092, which
+also bounds how strict any operating point can be.
+
+**Ensemble and selection.**
+- The second detector was chosen by a stated rule: among ensembles with clean window FPR ≤ 1.5%
+  and simulated-lag FPR ≤ 2% up to 80 ms, the highest recall against an attacker optimised
+  against *that* ensemble.
+- **The lag condition was added after a first run**, in which the rule without it chose One-Class
+  SVM on all features. That detector catches the XGBoost-optimised attacker perfectly (window
+  recall 1.000 vs 0.006 for XGBoost alone), but flags 100% of human windows at a simulated 80 ms
+  ping.
+- The cause is a single feature. `tick_frac`, the share of intervals on the 50 ms grid, shifts
+  with network jitter, and a novelty detector flags any distribution shift. A novelty detector
+  must therefore not see features that describe the network.
+- Robust variants of One-Class SVM and Isolation Forest without `tick_frac` and `dup_frac` were
+  added as candidates. The rule selected **XGBoost + robust One-Class SVM**.
+
+| policy (window level, α = 1%) | human FPR | none | uniform | gaussian | human_like | opt. vs XGBoost | opt. vs this ensemble |
+|---|---|---|---|---|---|---|---|
+| XGBoost | 0.013 [0.005, 0.025] | 0.995 | 0.973 | 0.988 | 0.153 | 0.006 | 0.006 |
+| XGBoost + OCSVM (all features) | 0.008 | 0.998 | 0.945 | 0.973 | 0.085 | 1.000 | 0.039 |
+| **XGBoost + robust OCSVM** | 0.008 [0.003, 0.015] | 0.999 | 0.946 | 0.974 | 0.084 | 0.113 | 0.029 |
+
+Human FPR is cross-validated by participant. Adaptive attackers (evolution strategy, ≥ 12 CPS)
+are scored by the final ensemble.
+
+The trade-off is explicit. Removing network features makes the novelty detector robust to lag,
+but also removes the signal (same-tick duplicates, `dup_frac`) that exposed the
+XGBoost-optimised attacker.
+
+**Session-level alarm.** One VL is added when at least K of the last 8 windows are flagged. K is
+the smallest value with no false alarm on the calibration humans' sessions (K = 3), never chosen
+on test data. Rates per 180 s session:
+
+| policy | human | standard clickers | human_like | opt. vs XGBoost | opt. vs this ensemble |
+|---|---|---|---|---|---|
+| XGBoost, K = 3 | 3.3% | 100% | 30.6% | 1.4% | – |
+| XGBoost + robust OCSVM, K = 3 | 1.7% | 100% | 22.2% | 52.8% | 12.5% |
+
+Accumulating evidence lets weak signals add up. The `human_like` clicker, detected in 8–15% of
+windows, raises an alarm in 22–31% of sessions. Standard clickers are caught after a median of
+3 windows.
+
+**Conservative mode under lag.** Up to 80 ms of ping: normal α. Up to 150 ms: α × 0.25. Above:
+the window is not evaluated. The factor 0.25 is the strictest that stays above the p-value floor
+with two detectors; a first value of 0.1 made detection impossible, recall 0. In the plugin, low
+TPS also suspends evaluation.
+
+| simulated ping (ms) | 0 | 20 | 80 | 150 | 250 |
+|---|---|---|---|---|---|
+| ensemble, always: human FPR | 0.016 | 0.016 | 0.017 | 0.118 | 0.126 |
+| ensemble, conservative: human FPR | 0.016 | 0.016 | 0.017 | 0.039 | not evaluated |
+| ensemble, conservative: recall | 0.959 | 0.954 | 0.942 | 0.737 | not evaluated |
+| XGBoost, conservative: human FPR | 0.029 | 0.027 | 0.026 | 0.011 | not evaluated |
+
+Abstention is a policy choice with a known risk: a player who fakes lag is not evaluated. The
+plugin logs every abstention so that it can be audited.
+
 ## 6. Integration in the plugin
 
 The extension follows the thesis's operational constraints.
@@ -365,6 +436,18 @@ The extension follows the thesis's operational constraints.
     14× smaller (183 KB).
   - ONNX inference costs ~25–45 µs per window (median over two runs, Python onnxruntime on the development
     machine; not measured inside the server).
+- **Decision policy in the plugin.**
+  - `ClickModel` loads the ensemble described in `click_model.json`: XGBoost plus the robust
+    One-Class SVM (13 KB), each with its feature subset and its calibration table.
+  - It returns calibrated p-values. A JUnit test checks that they equal the Python values
+    exactly.
+  - `SessionDecision` implements the K-of-N alarm and `LagPolicy` the conservative mode.
+  - Ping and TPS are read on the main thread when a window closes, and the decision is taken
+    back on the main thread.
+  - In `shadow` mode every evaluated window, flag, alarm and abstention is written to
+    `ml_shadow.csv` with its p-values, ping and TPS.
+  - The conservative mode also suspends the original threshold AutoClicker check under very high
+    ping or low TPS.
 - **Fail-safe switch.**
   - `deteccion.autoclicker.engine: threshold | shadow | ml`, default `threshold`.
   - Invalid values, a missing ONNX Runtime or model, or a feature-order mismatch all fall back
@@ -405,6 +488,11 @@ The extension follows the thesis's operational constraints.
 ## 7. Limitations and ethics
 
 **Limitations.**
+- **Decision policy.** The choice of the second detector used a criterion completed after
+  seeing a first result (Section 5.5); it is reported, not hidden. The deployed ensemble is
+  robust to simulated lag but weak against an attacker optimised against it, and the
+  conservative mode can be gamed by faking lag. K = 3 was calibrated on about 30 synthetic
+  sessions, a coarse resolution for a session-level false-alarm rate.
 - **Held-button rule under lag.** The late-tick tolerance (Section 6) reduces, but does not
   remove, false AutoClicker flags under jitter (Section 5.3). The 85 ms release gap is a
   compromise: it absorbs one slow tick without letting a 50/100 ms clicker pass as mining.
@@ -453,8 +541,9 @@ The extension follows the thesis's operational constraints.
 3. **Valid stress test.** Use headless test clients generating high-frequency events, measuring
    TPS/MSPT, recorder drops and ML-queue drops, to exercise the event-handling and
    asynchronous logging paths directly.
-4. **Detector ensemble and VL policy.** Combine heterogeneous detectors (Section 5.2), and
-   study how window flags should accumulate into VL under a session-level FPR budget.
+4. **Decision policy on real data.** Re-calibrate the p-value tables, K and the lag bands
+   with real players. Measure abstention rates and whether faked lag is visible in practice.
+   Look for novelty features that are robust to lag yet keep the adversarial signal.
 5. **Movement models**, once `speed_mod` / `fly_mod` sessions exist (features are already
    implemented).
 
