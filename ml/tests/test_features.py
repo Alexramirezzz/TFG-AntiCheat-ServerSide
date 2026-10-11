@@ -69,3 +69,11 @@ def test_window_routed_to_mining_and_invalid():
 def test_dup_frac():
     f = window_features(np.arange(0, 1500, 100.0), np.zeros(15, bool), np.r_[np.ones(5), np.zeros(10)])
     assert f["dup_frac"] == pytest.approx(5 / 20)
+
+
+def test_calibrate_threshold_respects_target():
+    from src.evaluate import calibrate
+    s = np.arange(1, 1001, dtype=float)
+    thr = calibrate(s, 0.01)
+    assert np.mean(s > thr) <= 0.01 and np.mean(s > thr) == pytest.approx(0.01)
+    assert calibrate(s[:500], 0.001) == 500.0  # resolution limit: max of calibration set
