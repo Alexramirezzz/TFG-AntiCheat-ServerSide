@@ -47,6 +47,7 @@ Step "D models + evaluation"        { & $py -m src.evaluate }
 Step "E adversarial experiment"     { & $py -m src.adversarial }
 Step "F simulated lag"              { & $py -m src.lag }
 Step "G explainability"             { & $py -m src.explain }
+Step "I decision policy (ensemble, session, lag)" { & $py -m src.decision }
 Step "H export ONNX + Java fixtures" { & $py -m src.export_onnx }
 
 if (-not $SkipJava) {

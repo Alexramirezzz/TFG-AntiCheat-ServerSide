@@ -25,14 +25,19 @@ from . import config as C
 from .features import FEATURES
 
 FIXED_RULES = {"baseline_orig_raw", "baseline_orig_clean"}
+# Features that describe the network / tick grid rather than the player. A novelty detector flags ANY
+# distribution shift, so with these inputs it flags lag itself (Phase I: tick_frac alone made One-Class
+# SVM flag 100% of human windows at a simulated 80 ms ping). The *_robust detectors exclude them.
+NETWORK_FEATURES = ["tick_frac", "dup_frac"]
+ROBUST_FEATURES = [f for f in FEATURES if f not in NETWORK_FEATURES]
 
 
 def is_attack(df: pd.DataFrame) -> np.ndarray:
     return (~df["label"].isin(C.HUMAN_LABELS)).to_numpy().astype(int)
 
 
-def X_of(df: pd.DataFrame) -> np.ndarray:
-    return df[FEATURES].to_numpy(dtype=np.float32)
+def X_of(df: pd.DataFrame, features: list[str] | None = None) -> np.ndarray:
+    return df[features or FEATURES].to_numpy(dtype=np.float32)
 
 
 class FixedRule:
@@ -56,7 +61,8 @@ class CvRule:
 
 
 class Unsupervised:
-    def __init__(self, kind: str, seed: int):
+    def __init__(self, kind: str, seed: int, features: list[str] | None = None):
+        self.features = features or FEATURES
         if kind == "iforest":
             self.m = IsolationForest(n_estimators=300, random_state=seed, n_jobs=-1)
         else:
@@ -64,13 +70,13 @@ class Unsupervised:
         self.kind = kind
     def fit(self, df):
         h = df[is_attack(df) == 0]
-        X = X_of(h)
+        X = X_of(h, self.features)
         if self.kind == "ocsvm" and len(X) > 5000:   # O(n^2) kernel: subsample deterministically
             X = X[np.random.default_rng(C.SEED).choice(len(X), 5000, replace=False)]
         self.m.fit(X)
         return self
     def score(self, df):
-        return -self.m.decision_function(X_of(df))
+        return -self.m.decision_function(X_of(df, self.features))
 
 
 class Supervised:
@@ -150,6 +156,8 @@ def make_detector(name: str, seed: int = C.SEED):
         return CvRule()
     if name in ("iforest", "ocsvm"):
         return Unsupervised(name, seed)
+    if name in ("iforest_robust", "ocsvm_robust"):
+        return Unsupervised(name.split("_")[0], seed, ROBUST_FEATURES)
     if name in ("rf", "xgb"):
         return Supervised(name, seed)
     if name == "cnn1d":

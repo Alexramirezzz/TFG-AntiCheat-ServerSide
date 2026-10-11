@@ -35,7 +35,7 @@ A full run takes ~5 min on a laptop CPU. A clean re-run reproduced every reporte
 are fixed; differences appear only in the last digit of one bootstrap bound).
 
 Steps one by one: `python -m src.data | src.synthetic | src.features | src.evaluate |
-src.adversarial | src.lag | src.explain | src.export_onnx` (run from `ml\`, with `ML_RAW_DIR`
+src.adversarial | src.lag | src.explain | src.decision | src.export_onnx` (run from `ml\`, with `ML_RAW_DIR`
 pointing at the raw folder).
 
 ## Layout
@@ -51,6 +51,7 @@ pointing at the raw folder).
 | `src/adversarial.py` | **E** adversary levels, evolutionary attacker, adversarial training |
 | `src/lag.py` | **F** simulated lag (real-lag protocol: `docs/real_lag_test_protocol.md`) |
 | `src/explain.py` | **G** SHAP, permutation importance, audit-log explanations |
+| `src/decision.py` | **I** decision policy: detector ensemble with calibrated p-values, session-level alarm, conservative mode under lag |
 | `src/export_onnx.py` | **H** ONNX export, parity check, Java fixtures, latency |
 | `results/` | figures, tables, `data_report.md`, `phase_[d-g]_results.md`, exported model |
 | `data/raw/` | real sessions, **git-ignored, never commit** |
@@ -193,6 +194,24 @@ Phase F (simulated lag, fresh synthetic humans): XGBoost FPR is 2.8% / 2.5% / 4.
 ping 0 / 80 / 150 / 250 ms. RF stays ≤ 2.6% but loses recall at 250 ms (0.42). Isolation Forest
 rises to 30% at 150 ms and One-Class SVM reaches 100% FPR from 80 ms.
 
+Phase I (decision policy, `phase_i_results.md`):
+- **Calibrated p-values.** Each detector score becomes p = fraction of calibration human windows
+  that look at least as machine-like. A window is flagged when min p < 1% / M (Bonferroni).
+- **Ensemble.** XGBoost + One-Class SVM on all features catches the attacker optimised against
+  XGBoost (window recall 0.006 → 1.000), but flags **100%** of human windows at a simulated 80 ms
+  ping: a novelty detector flags any distribution shift, and `tick_frac` shifts with network
+  jitter. A *robust* One-Class SVM without the network features (`tick_frac`, `dup_frac`) is the
+  detector selected by the stated rule. Clean window FPR is 0.8% (XGBoost alone 1.3%), and FPR
+  stays ≤ 1.7% up to a simulated 80 ms ping. The price: against the XGBoost-optimised attacker,
+  window recall drops to 0.113 (session alarm 53%). The lag condition of the selection rule was
+  added after a first run showed the original choice failing under lag (documented).
+- **Session decision.** An alarm (+1 VL) needs ≥ 3 flagged windows among the last 8 (K chosen on
+  calibration sessions). Human sessions with an alarm: 1.7% (ensemble) vs 3.3% (XGBoost). The
+  `human_like` clicker, hard to see per window (8–15%), raises an alarm in 22–31% of sessions.
+- **Conservative mode under lag.** Up to 80 ms: normal. Up to 150 ms: alpha × 0.25. Above: not
+  evaluated. At 150 ms the ensemble's human FPR falls from 11.8% to 3.9% (recall 0.89 → 0.74);
+  XGBoost alone from 4.3% to 1.1%.
+
 Phase G: SHAP ranks histogram entropy, mean interval and lag-1 autocorrelation first.
 Permutation importance is ~0 because the features are redundant and PR-AUC is saturated.
 `phase_g_results.md` shows three decisions as audit-log lines, including a false positive on a
@@ -206,6 +225,10 @@ human.
   server).
 - It runs on a background thread, and the default `engine: threshold` keeps it off. Use
   `shadow` to log scores without VL.
+- The engine uses the Phase I policy: XGBoost + robust One-Class SVM (13 KB ONNX) with calibrated
+  p-values, an alarm after 3 of the last 8 windows, and the conservative mode (configurable under
+  `deteccion.lag`; low TPS also suspends evaluation). Java and Python p-values match exactly
+  (unit test).
 - Detector fixes after a manual server test: held-button late-tick tolerance (AutoClicker),
   FastBreak based on the expected break time of each block (`getBreakSpeed`, vanilla 0.7
   margin, creative skipped), Fly limited to anomalous ascent, and movement checks skipped for
@@ -225,6 +248,13 @@ human.
 - One optimizer (ES, small budget) and one objective (mean XGBoost score). Stronger adaptive
   attacks are possible, so recall against `optimized*` is an upper bound on robustness, not a
   guarantee.
+- **Robustness vs adversarial coverage.** Removing network features makes the novelty detector
+  robust to lag but blind to the same-tick duplicates that exposed the XGBoost-optimised attacker.
+  An attacker optimised against the deployed ensemble still evades most windows (recall 0.029,
+  session alarm 12.5%).
+- **Abstention can be abused.** The conservative mode does not evaluate players with very high
+  ping. An attacker could fake lag to avoid evaluation; abstentions are logged (`ml_shadow.csv`)
+  so that sustained abstention is visible.
 - Movement ML (speed/fly) was not attempted: there are no labelled cheat sessions, and the 13
   real movement windows are only summarised (`tables/real_movement_window_summary.csv`).
 
@@ -239,6 +269,9 @@ See also `docs/ml_report.md` (paper-style report) and `docs/real_lag_test_protoc
   in a server test) does not end a mining run.
 - **Feature definitions** use biased moments and explicit percentiles so that the Java port
   matches them exactly.
-- **`held_frac`, ping and TPS are not model inputs** (see Method).
+- **`held_frac`, ping and TPS are not model inputs** (see Method). Ping and TPS are used only
+  by the conservative mode, as a gate, never as evidence.
+- **Novelty detectors exclude network features** (`tick_frac`, `dup_frac`), because they flag any
+  distribution shift, including the one caused by lag.
 - **The plugin's default engine is `threshold`**, because the shipped model is a DEMO trained on
   synthetic data.

@@ -1,3 +1,3 @@
 what,median_us,p99_us,machine,note
-onnx_inference_1_window,43.40003943070769,121.60399463027716,"AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD / Windows","Python onnxruntime, 1 intra-op thread; indicative, not measured in the server"
-python_feature_extraction_1_window,123.70001059025526,502.3479834198951,"AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD / Windows","Python onnxruntime, 1 intra-op thread; indicative, not measured in the server"
+onnx_inference_1_window,22.099993657320738,44.40298886038362,"AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD / Windows","Python onnxruntime, 1 intra-op thread; indicative, not measured in the server"
+python_feature_extraction_1_window,74.79998748749495,132.31801742222157,"AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD / Windows","Python onnxruntime, 1 intra-op thread; indicative, not measured in the server"
