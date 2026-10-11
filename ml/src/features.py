@@ -172,3 +172,73 @@ def movement_windows(moves: pd.DataFrame) -> pd.DataFrame:
                              "tps_min": float(g["tps"].to_numpy()[m].min())})
             start += C.STRIDE_S * 1000
     return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------ script
+def _summary(win: pd.DataFrame) -> pd.DataFrame:
+    if win.empty:
+        return pd.DataFrame()
+    g = win.groupby(["origin", "window_type", "level", "label"])
+    out = g.agg(windows=("valid", "size"), valid=("valid", "sum"),
+                routed_mining=("routed", lambda r: int((r == "mining").sum())),
+                participants=("participant", "nunique")).reset_index()
+    sc = scored(win)
+    if len(sc):
+        out = out.merge(sc.groupby(["origin", "window_type", "level", "label"])
+                        .agg(scored=("valid", "size"), **{f"median_{f}": (f, "median") for f in
+                                                          ["mean", "cv", "entropy", "ac1", "tick_frac", "max_cps_1s"]})
+                        .reset_index(), how="left")
+    return out
+
+
+def plot_features(win: pd.DataFrame, path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    sc = scored(win[win["window_type"] == "count"])
+    levels = ["human", "none", "uniform", "gaussian", "human_like"]
+    feats = ["cv", "entropy", "ac1", "tick_frac", "dup_frac", "max_cps_1s"]
+    fig, axes = plt.subplots(1, len(feats), figsize=(3.0 * len(feats), 3.2))
+    for ax, f in zip(axes, feats):
+        data = [sc.loc[(sc["level"] == l) & (sc["origin"] == "synthetic"), f].dropna() for l in levels]
+        ax.boxplot(data, tick_labels=levels, showfliers=False)
+        ax.set_title(f, fontsize=9)
+        ax.tick_params(axis="x", rotation=60, labelsize=7)
+    fig.suptitle(f"Window features (50-click windows) by level - {C.DEMO_TAG}", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def main() -> None:
+    import logging
+    from .data import build_click_streams, load_raw, trim_moves
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    log = logging.getLogger("features")
+    syn = pd.read_csv(C.PROCESSED_DIR / "synthetic_click_streams.csv")
+    real = load_raw()
+    rs = build_click_streams(real)
+    mv = trim_moves(real.moves) if len(real.moves) else None
+    allw = []
+    for wt in ("count", "time"):
+        sw = make_windows(syn, wt)
+        sw.to_csv(C.PROCESSED_DIR / f"synthetic_windows_{wt}.csv", index=False)
+        rw = make_windows(rs, wt, moves=mv) if len(rs) else pd.DataFrame()
+        rw.to_csv(C.PROCESSED_DIR / f"real_windows_{wt}.csv", index=False)
+        allw += [sw, rw]
+        log.info("%s windows: synthetic=%d real=%d (real scored=%d)", wt, len(sw), len(rw),
+                 len(scored(rw)) if len(rw) else 0)
+    win = pd.concat([w for w in allw if len(w)], ignore_index=True)
+    _summary(win).to_csv(C.TAB_DIR / "window_summary.csv", index=False)
+    plot_features(win, C.FIG_DIR / "synthetic_feature_boxplots.png")
+    if mv is not None and len(mv):
+        mw = movement_windows(mv)
+        mw.to_csv(C.PROCESSED_DIR / "real_movement_windows.csv", index=False)
+        if len(mw):
+            mw.drop(columns=["session_id", "t_start_ms"]).groupby("label").agg(["count", "median", "max"]) \
+              .T.reset_index().to_csv(C.TAB_DIR / "real_movement_window_summary.csv", index=False)
+        log.info("real movement windows: %d", len(mw))
+
+
+if __name__ == "__main__":
+    main()
