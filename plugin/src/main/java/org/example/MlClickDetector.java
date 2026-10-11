@@ -95,8 +95,14 @@ public final class MlClickDetector {
         return errors.get();
     }
 
+    /** Detiene el hilo de ML y espera (max. 2 s) a la inferencia en curso antes de cerrar el modelo. */
     public void shutdown() {
         executor.shutdownNow();
+        try {
+            executor.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         buffers.clear();
     }
 }
